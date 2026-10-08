@@ -1,0 +1,21 @@
+.DS_Store
+__pycache__/
+*.pyc
+.venv/
+# LaTeX build files
+*.aux
+*.bcf
+*.log
+*.run.xml
+*.toc
+*.out
+# separate repo (github.com/alessandronoiato/halfcheetah)
+experiments/halfcheetah/
+# LLM experiment outputs and model checkpoints
+experiments/tie_drift_llm/data/
+# thesis text and outputs: code only for now
+*.tex
+*.bib
+*.pdf
+CLAUDE.md
+experiments/tie_drift/results/
