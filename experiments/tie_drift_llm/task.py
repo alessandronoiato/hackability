@@ -93,6 +93,7 @@ def build_dataset(
     seed: int = 0,
     fewshot: int = 0,
     fewshot_giveups: int = 0,
+    demo_order: str | None = None,
 ) -> dict:
     levels = sorted(set(levels or [1, 4, 16, n_prompts]))
     for K in levels:
@@ -146,8 +147,15 @@ def build_dataset(
             continue
         seen.add((x, y))
         demo_problems.append((x, y))
-    gives = [True] * fewshot_giveups + [False] * (fewshot - fewshot_giveups)
-    rng.shuffle(gives)
+    if demo_order:
+        # Explicit order, e.g. "wwwwwg": w = worked solution, g = give-up.
+        # The give-up rate depends strongly on how close a give-up demo is to the query.
+        if set(demo_order) - {"w", "g"} or len(demo_order) != fewshot:
+            raise ValueError(f"demo_order {demo_order!r} must be {fewshot} letters from 'wg'")
+        gives = [c == "g" for c in demo_order]
+    else:
+        gives = [True] * fewshot_giveups + [False] * (fewshot - fewshot_giveups)
+        rng.shuffle(gives)
     messages = []
     for (x, y), give in zip(demo_problems, gives):
         codes = rng.sample(free, len(levels))
@@ -160,7 +168,8 @@ def build_dataset(
         messages.append(dict(role="assistant", content=reply))
 
     spec = dict(n_prompts=n_prompts, levels=levels, digits=list(digits), template=template,
-                loophole_frac=loophole_frac, seed=seed, fewshot=fewshot, fewshot_giveups=fewshot_giveups)
+                loophole_frac=loophole_frac, seed=seed, fewshot=fewshot, fewshot_giveups=fewshot_giveups,
+                demo_order=demo_order)
     return dict(spec=spec, levels=levels, prompts=prompts, fewshot=messages)
 
 
@@ -310,6 +319,8 @@ def main() -> None:
     b.add_argument("--seed", type=int, default=0)
     b.add_argument("--fewshot", type=int, default=0, help="demonstration turns before each prompt")
     b.add_argument("--fewshot-giveups", type=int, default=0, help="how many demos give up")
+    b.add_argument("--demo-order", default=None,
+                   help="explicit demo order, e.g. wwwwwg (w worked, g give-up); overrides --fewshot*")
     sub.add_parser("selftest")
     args = ap.parse_args()
 
@@ -317,8 +328,11 @@ def main() -> None:
         _selftest()
         return
     d1, d2 = (int(s) for s in args.digits.lower().split("x"))
+    if args.demo_order:
+        args.fewshot, args.fewshot_giveups = len(args.demo_order), args.demo_order.count("g")
     ds = build_dataset(args.n_prompts, args.levels, (d1, d2), args.template,
-                       args.loophole_frac, args.seed, args.fewshot, args.fewshot_giveups)
+                       args.loophole_frac, args.seed, args.fewshot, args.fewshot_giveups,
+                       args.demo_order)
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
     with open(out, "w") as f:
