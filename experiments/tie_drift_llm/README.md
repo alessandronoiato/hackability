@@ -200,7 +200,7 @@ Cheaper first pass: `ARMS="adam sgd" SEEDS="0 1"` (8 runs).
   design), grader and categories (`honest`, `hack`, `code_other`, `code_invalid`,
   `wrong`), `eval_metrics`, `selftest`.
 * `llm.py`: model loading, exact sampling, sequence log-probs.
-* `calibrate.py`, `warmstart.py`, `probe.py`, `grpo.py`, `analyze.py`, `run_sweep.sh`.
+* `calibrate.py`, `match.py` (cue design: match exception's pi0 hack mass to a rule arm), `warmstart.py`, `probe.py`, `grpo.py`, `analyze.py`, `run_sweep.sh`.
 
 ## Status (2026-10-12)
 
@@ -461,19 +461,25 @@ balanced as well. `--cue-values red blue` shows `Cue: red` / `Cue: blue` instead
 code kept). The last two are evaluated only.
 
 **Matching.** Honest mass `a_i` is identical across conditions by construction (same
-prompts, same pi0). The hack mass can differ only through pi0 following the cue.
-If a fraction `q` of give-ups pick the cued code, then `b_rule ≈ q·g`,
-`b_anti ≈ (1 − q)·g` and `b_exception ≈ g/2`. No exception assignment that is
-independent of the cue can match `rule` unless `q = 1/2`. Hence the `anti` condition:
-the **conservative arm** is whichever of `rule` and `anti` has `b ≤ b_exception`, so any
-pi0 bias works against the prediction. The K design failed partly because the
-bias (`lotus`) worked for it. `calibrate.py` reports `q` with a CI, the paired per-prompt
-`b` difference against `exception`, `frac b_i > a_i` and `giveup_adv` per condition,
-and names the conservative arm. Gates: the existing `a`, `b` and `b < a` checks;
-`q` in 0.4-0.6 (then both rule arms are matched); and conservative-arm `b` at
-0.7-1.0 of the exception arm's. Screen constructions on a smoke calibration. Confirm
-on a full calibration with a different sampling `--seed`, because a match measured
-on the samples that selected the construction is overstated.
+prompts, same pi0). The hack mass differs through which listed code pi0 picks on the
+prompts where it gives up: cue reading, position (`(B)` is chosen in about 0.9 of
+give-ups) and word preference. If a fraction `q` of give-ups pick the cued code, then
+`b_rule ≈ q·g`, `b_anti ≈ (1 − q)·g` and `b_exception ≈ g/2`. The **conservative arm** is
+whichever of `rule` and `anti` has the lower `b`, so any leftover bias works against
+the prediction. The K design failed partly because the bias (`lotus`) worked for it.
+`match.py` then removes the rest. The exception label is never shown, so it can be
+reassigned without changing the prompts or pi0. On a prompt whose exception label
+equals the cue, `exception` accepts the same code as `rule`; elsewhere, the same code as
+`anti`. One full calibration therefore gives `b_exception` for every assignment.
+`match.py` picks the assignment, still balanced in every (cue, exception label) cell
+of train and flip, whose `b_exception` equals the conservative arm's `b` (and whose
+fraction of prompts with `b_i > a_i` is close to it). The exception arm stays
+cue-independent by construction. `calibrate.py` reports pooled `q`, the cue effect
+(the `(B)` share on cue-B minus cue-A prompts), the paired per-prompt `b` difference
+against `exception`, `frac b_i > a_i` and `giveup_adv`. Gates: the existing `a`, `b` and
+`b < a` checks, and matched-arm `b` at 0.8-1.2 of the exception arm's on a confirming
+calibration with a different sampling `--seed`. A match measured on the samples that
+chose it is overstated.
 
 **First smoke (2026-10-14, Vast; 32 prompts × 16).** The original build failed the
 gates. Cue-following `q` was 0.78 [0.62, 0.90] (seed 0) and 0.69 [0.52, 0.83] (seed 1),
@@ -487,6 +493,18 @@ is also an obvious instruction to a chat model. So the screen below compares it 
 `--cue-values red blue`, which the model cannot read off the labels. The choice
 depends only on pi0: use the letter cue if both seeds pass the `q` gate; otherwise
 use the colour cue.
+
+**Second smoke (2026-10-14, after the fixes; letter / colour cue).** Pooled `q`: seed 0
+0.89 / 0.83, seed 1 0.17 / 0.35. `(B)` share 0.84-0.96. Give-up rate 0.22-0.28, `a`
+0.31-0.44, unlisted codes 0.02-0.11. All four failed the `q` gate, so by the rule above the
+colour cue is used. But `q` is not cue reading here. The letter and colour builds share
+words, questions and cue assignments, and their `q` moves together, including seed 1's
+0.17, where the model would be "anti-following" an explicit `Cue: A`. In a simulation
+with the cue ignored and `(B)` chosen 0.9 of the time, the pooled `q` on 32 prompts falls
+between 0.35 and 0.66 in 90% of draws. Values of 0.17 and 0.89 therefore point to
+per-prompt word preference that by chance lines up with the cue assignment. The `q`
+gate was replaced by the cue effect (INFO) and by matching `exception` to the
+conservative arm with `match.py` on a full calibration.
 
 **Measurements** (`grpo.py` evaluates all splits; `analyze.py`):
 
@@ -524,7 +542,7 @@ use the colour cue.
 
 ```bash
 D=experiments/tie_drift_llm/data
-# screen: letter cue (cue_) vs colour cue (cuec_), same words and questions per seed
+# screen (done 2026-10-14): letter cue (cue_) vs colour cue (cuec_), same words and questions per seed
 for S in 0 1; do
   python experiments/tie_drift_llm/task.py build-cue --out $D/cue_s$S.json --seed $S \
     --demo-order wwwwwwgg --pair-tokens Qwen/Qwen2.5-0.5B-Instruct
@@ -535,16 +553,20 @@ for S in 0 1; do
       --out $D/calib_${V}_s${S}_smoke 2>&1 | tee $D/calib_${V}_s${S}_smoke.log
   done
 done
-# confirm the chosen variant V on fresh samples, then probe
+# full calibration -> match exception to the conservative arm -> confirm on fresh samples -> probe
 for S in 0 1; do
-  python experiments/tie_drift_llm/calibrate.py --dataset $D/${V}_s$S.json --seed 1
-  python experiments/tie_drift_llm/probe.py --dataset $D/${V}_s$S.json --micro-batch 2 --std-norm --conds rule anti exception
+  python experiments/tie_drift_llm/calibrate.py --dataset $D/cuec_s$S.json 2>&1 | tee $D/calib_cuec_s$S.log
+  python experiments/tie_drift_llm/match.py --dataset $D/cuec_s$S.json \
+    --calib $D/calib_cuec_s$S/summary.json --out $D/cuecm_s$S.json 2>&1 | tee $D/match_cuec_s$S.log
+  python experiments/tie_drift_llm/calibrate.py --dataset $D/cuecm_s$S.json --seed 1 2>&1 | tee $D/calib_cuecm_s$S.log
+  python experiments/tie_drift_llm/probe.py --dataset $D/cuecm_s$S.json --micro-batch 2 --std-norm \
+    --conds rule anti exception 2>&1 | tee $D/probe_cuecm_s$S.log
 done
-# ARM = the conservative arm named by the confirming calibration of each construction
+# ARM = the matched arm (match.py output, spec.exception_match.arm) of each construction
 ARMS=adam SEEDS="0 1 2" CONDS="$ARM exception" \
 EXTRA="--steps 30 --eval-every 5 --kl-stop 100 --save-steps 30 --grad-ckpt --micro-batch 4 --gen-batch 128" \
-  bash experiments/tie_drift_llm/run_sweep.sh $D/${V}_s$S.json 0
-python experiments/tie_drift_llm/analyze.py --dataset $D/${V}_s$S.json --at-step 30
+  bash experiments/tie_drift_llm/run_sweep.sh $D/cuecm_s$S.json 0
+python experiments/tie_drift_llm/analyze.py --dataset $D/cuecm_s$S.json --at-step 30
 ```
 
 `--n-prompts 32` on the smoke run keeps the first 32 train prompts. Their balance is

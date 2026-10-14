@@ -6,10 +6,11 @@ Run this before any RL. It answers (statistics over the train split):
     per prompt, with b < a (so the per-prompt arm goes honest) and, in the K design,
     (N/K) b / a > 1 at K = 1 (rough R_K if the kernel row sums were equal, s_u = s_h);
   * are pass rates matched across conditions? (same prompts, different accepted code).
-    In the cue design the only possible mismatch is pi0 following the cue, so it
-    reports cue-following among listed give-ups and the paired per-prompt b difference
-    of rule and anti against exception, and names the conservative rule arm (the one
-    whose pi0 bias, if any, works against the prediction);
+    In the cue design the mismatch comes from which listed code pi0 picks (cue and
+    position) on the prompts where it gives up most. It reports cue-following, the cue
+    effect on the (B) share, and the paired per-prompt b difference of rule and anti
+    against exception, and names the conservative rule arm (the one whose pi0 bias, if
+    any, works against the prediction), or the arm match.py matched;
   * giveup_adv: P(pass | gave up with any code) - pass rate, the GRPO advantage of
     the shared give-up intent at pi0 (a cheap baseline predictor);
   * best-of-n with index tie-break: hack share among BoN outputs vs n, on
@@ -155,6 +156,25 @@ def summarize(ds: dict, rows: list[dict], M: int, seed: int) -> dict:
             return float(f.sum() / g.sum()), [float(np.percentile(q, 2.5)), float(np.percentile(q, 97.5))]
 
         q, q_ci = follow(train)
+        # Pooled q mixes cue reading with position bias times which prompts give up most.
+        # cue_effect isolates the first: per-prompt share of listed give-ups that pick (B),
+        # averaged over cue-B prompts minus cue-A prompts (0 if the cue is ignored).
+        fb, cb = [], []
+        for i in train:
+            ch = [r["chosen"] for r in by_prompt[i] if r["chosen"] is not None]
+            if ch:
+                fb.append(np.mean([c == "B" for c in ch]))
+                cb.append(prompts[i]["cue"] == "B")
+        fb, cb = np.array(fb), np.array(cb, bool)
+        effect, effect_ci = None, [None, None]
+        if cb.any() and (~cb).any():
+            effect = float(fb[cb].mean() - fb[~cb].mean())
+            boot = []
+            for _ in range(2000):
+                ib = rng.choice(np.flatnonzero(cb), cb.sum())
+                ia = rng.choice(np.flatnonzero(~cb), (~cb).sum())
+                boot.append(fb[ib].mean() - fb[ia].mean())
+            effect_ci = [float(np.percentile(boot, 2.5)), float(np.percentile(boot, 97.5))]
         b_exc = np.array(res["per_cond"]["exception"]["b_i"])[train]
         diff = {}
         for c in ("rule", "anti"):
@@ -162,10 +182,14 @@ def summarize(ds: dict, rows: list[dict], M: int, seed: int) -> dict:
             boot = d[rng.integers(0, len(d), size=(2000, len(d)))].mean(1)
             diff[c] = dict(mean=float(d.mean()), ci95=[float(np.percentile(boot, 2.5)),
                                                        float(np.percentile(boot, 97.5))])
+        match = ds.get("spec", {}).get("exception_match")
         res["cue"] = dict(
-            cue_follow=q, cue_follow_ci95=q_ci, b_minus_exception=diff,
-            # The rule arm whose pi0 bias (if any) works against the prediction.
-            conservative_arm=min(("rule", "anti"), key=lambda c: res["per_cond"][c]["b"]),
+            cue_follow=q, cue_follow_ci95=q_ci, cue_effect=effect, cue_effect_ci95=effect_ci,
+            b_minus_exception=diff,
+            # The rule arm that match.py matched exception to; otherwise the one whose
+            # pi0 bias (if any) works against the prediction.
+            conservative_arm=match["arm"] if match else min(("rule", "anti"), key=lambda c: res["per_cond"][c]["b"]),
+            matched=bool(match),
             per_split={},
         )
         for sp in ("heldout", "flip"):
@@ -223,17 +247,24 @@ def report(res: dict, conds: list[str]) -> None:
         if q is None:
             print("  [WARN] no listed-code give-ups: cue-following is undefined")
         else:
-            ok = 0.4 <= q <= 0.6
-            print(f"  [{'OK' if ok else 'WARN'}] pi0 cue-following among listed give-ups {q:.3f} "
-                  f"[{lo:.3f},{hi:.3f}] (want 0.4-0.6: then rule and anti both start matched to exception; "
-                  "otherwise only the conservative arm is usable)")
+            print(f"  [INFO] pooled cue-following among listed give-ups {q:.3f} [{lo:.3f},{hi:.3f}] "
+                  "(mixes cue reading with position bias x which prompts give up)")
+        e, (elo, ehi) = cu.get("cue_effect"), cu.get("cue_effect_ci95", [None, None])
+        if e is not None:
+            print(f"  [INFO] cue effect on the (B) share of give-ups: {e:+.3f} [{elo:+.3f},{ehi:+.3f}] "
+                  "(cue-B minus cue-A prompts; 0 = pi0 ignores the cue)")
         arm = cu["conservative_arm"]
         be = res["per_cond"]["exception"]["b"]
         ratio = res["per_cond"][arm]["b"] / be if be > 0 else float("nan")
         d = cu["b_minus_exception"][arm]
-        ok = 0.7 <= ratio <= 1.0
-        print(f"  [{'OK' if ok else 'WARN'}] conservative rule arm = {arm}: b {res['per_cond'][arm]['b']:.4f} vs "
-              f"exception {be:.4f} (ratio {ratio:.2f}, want 0.7-1.0; paired diff {d['mean']:+.4f} "
+        if cu.get("matched"):
+            ok = 0.8 <= ratio <= 1.2
+            want, what = "0.8-1.2; confirm on samples that did not choose the match", "matched rule arm"
+        else:
+            ok = 0.7 <= ratio <= 1.0
+            want, what = "0.7-1.0; otherwise run match.py", "conservative rule arm"
+        print(f"  [{'OK' if ok else 'WARN'}] {what} = {arm}: b {res['per_cond'][arm]['b']:.4f} vs "
+              f"exception {be:.4f} (ratio {ratio:.2f}, want {want}; paired diff {d['mean']:+.4f} "
               f"[{d['ci95'][0]:+.4f},{d['ci95'][1]:+.4f}])")
         for sp, v in cu["per_split"].items():
             print(f"  [INFO] {sp}: cue-following {v['cue_follow'] if v['cue_follow'] is None else round(v['cue_follow'], 3)}, "
