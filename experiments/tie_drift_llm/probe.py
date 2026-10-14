@@ -13,9 +13,16 @@ The probe evaluates this at pi0 for
 and splits the SGD drift into the prompt's own term (tabular) and the term from
 the other prompts (cross-prompt; the coherence of Theorem "threshold"):
   <v, grad J_K> = <v, grad J_{K,i}> + <v, grad J_K - grad J_{K,i}>.
-Prediction: cross_k (hack, other prompts) falls from K = 1 to K = N; the SGD
-drift d_sgd does too. If cross_k is as large at K = N as at K = 1, the shared
-"give up" component dominates the code word and the intervention cannot work.
+Prediction: cross_k (hack, other prompts) falls from K = 1 to K = N (K design),
+or is larger under rule / anti than under exception (cue design); the SGD drift
+d_sgd does too. If cross_k is as large in the per-prompt arm, the shared "give up"
+component dominates and the intervention cannot work.
+
+cross_k is already the source/target split: the update comes from the other
+prompts, the change is measured on prompt i. Only train-split prompts are sources
+(GRPO never trains on held-out or flip prompts). In the K design the cross_k gap
+tracked pi0 word preference (giveup_adv in calibrate.py) in all four seeds, so
+read it against those cheap baselines, which the readout prints.
 
 grad J_K and the set members use disjoint halves of the calibration samples,
 so the self term is not inflated by reusing a sample in both.
@@ -44,7 +51,8 @@ def main() -> None:
     ap.add_argument("--dataset", required=True)
     ap.add_argument("--calib-dir", default=None, help="default: <dataset dir>/calib_<dataset stem>")
     ap.add_argument("--model", default="Qwen/Qwen2.5-0.5B-Instruct")
-    ap.add_argument("--levels", type=int, nargs="+", default=None, help="default: all dataset levels")
+    ap.add_argument("--conds", "--levels", dest="conds", nargs="+", default=None,
+                    help="default: all dataset conditions")
     ap.add_argument("--n-probe", type=int, default=32, help="probe prompts (need >= 1 honest member)")
     ap.add_argument("--max-members", type=int, default=4, help="members per set used for v_h, v_k")
     ap.add_argument("--std-norm", action="store_true", help="GRPO std-normalized advantages in grad J")
@@ -56,7 +64,7 @@ def main() -> None:
 
     ds = task.load_dataset(args.dataset)
     prompts = ds["prompts"]
-    levels = args.levels or ds["levels"]
+    levels = args.conds or task.conditions(ds)
     cdir = Path(args.calib_dir or Path(args.dataset).parent / f"calib_{Path(args.dataset).stem}")
     rows = [json.loads(line) for line in open(cdir / "samples.jsonl")]
     N = max(r["prompt_id"] for r in rows) + 1
@@ -68,6 +76,7 @@ def main() -> None:
     half = M // 2
     grad_rows = [b[:half] for b in by_prompt]      # for grad J
     memb_rows = [b[half:M] for b in by_prompt]     # for v_h, v_k
+    train = [i for i in range(N) if task.split_of(prompts[i]) == "train"]
 
     device = llm.pick_device(args.device)
     tok = llm.load_tokenizer(args.model)
@@ -98,18 +107,19 @@ def main() -> None:
         A = r - r.mean()
         if args.std_norm:
             A = A / (r.std() + 1e-4)
-        return A / (N * len(rs))
+        return A / (len(train) * len(rs))
 
     def hack_members(i: int, K: int) -> tuple[list[list[int]], str]:
         code = task.accepted_code(prompts[i], K)
         hit = [r["completion_ids"] for r in memb_rows[i] + grad_rows[i] if r["cat"][str(K)] == "hack"]
         if hit:
             return hit[:args.max_members], "sampled"
-        gave_up = [r for r in by_prompt[i] if r["chosen_level"] is not None]
+        chosen = lambda r: r.get("chosen", r.get("chosen_level"))  # noqa: E731 (older samples: chosen_level)
+        gave_up = [r for r in by_prompt[i] if chosen(r) is not None]
         if gave_up:
             out = []
             for r in gave_up[:args.max_members]:
-                old = prompts[i]["codes"][str(r["chosen_level"])]
+                old = prompts[i]["codes"][str(chosen(r))]
                 text = r["text"].replace(old, code)
                 out.append(tok(text, add_special_tokens=False)["input_ids"] + [eos])
             return out, "substituted"
@@ -117,7 +127,7 @@ def main() -> None:
         return [ids], "template"
 
     rng = np.random.default_rng(args.seed)
-    cand = [i for i in range(N) if prompts[i]["loophole"]
+    cand = [i for i in train if prompts[i]["loophole"]
             and any(r["cat"][str(levels[0])] == "honest" for r in memb_rows[i])]
     probe = sorted(rng.permutation(cand)[:args.n_probe].tolist())
     print(f"{len(probe)} probe prompts; grad J from {half} samples/prompt, members from {M - half}")
@@ -131,7 +141,7 @@ def main() -> None:
     results = {}
     for K in levels:
         items = []
-        for i in range(N):
+        for i in train:
             for r, w in zip(grad_rows[i], weights(grad_rows[i], K)):
                 if w != 0:
                     items.append((i, r["completion_ids"], float(w)))
@@ -178,19 +188,34 @@ def main() -> None:
         print(f"{K:>5} " + " ".join(f"{m:>11.3e}±{s:<9.1e}" for m, s in row.values())
               + f"  {fpos:>11.2f}  {srcs}")
 
-    K1, KN = str(levels[0]), str(levels[-1])
-    c1, cN = summary[K1]["cross_k"], summary[KN]["cross_k"]
-    d1, dN = summary[K1]["d_sgd"], summary[KN]["d_sgd"]
-    gap_se = np.hypot(c1["se"], cN["se"])
+    levels = [str(K) for K in levels]
+    if all(K.isdigit() for K in levels):
+        contrasts = [(levels[0], levels[-1])]
+    else:
+        contrasts = [(c, "exception") for c in ("rule", "anti") if c in levels and "exception" in levels]
     print("\nReading:")
-    print(f"  cross_k K={K1} minus K={KN}: {c1['mean'] - cN['mean']:.3e} (s.e. {gap_se:.1e}). "
-          "Theory: > 0 (coherence). About 0: randomizing the code word does not decohere the hack.")
-    print(f"  d_sgd K={K1} vs K={KN}: {d1['mean']:.3e} vs {dN['mean']:.3e}. Theory: K=1 larger; "
-          "sign(d_sgd) is the predicted initial direction under SGD.")
-    print(f"  d_sign K={K1} vs K={KN}: {summary[K1]['d_sign']['mean']:.3e} vs {summary[KN]['d_sign']['mean']:.3e}. "
-          "Same question for Adam's first step.")
-    print(f"  cross_h (honest coherence, the gamma of Prop. initial): {summary[K1]['cross_h']['mean']:.3e}; "
-          "if it dwarfs cross_k at K=1, honest coherence dominates (falsifier 4).")
+    for c1_, cN_ in contrasts:
+        c1, cN = summary[c1_]["cross_k"], summary[cN_]["cross_k"]
+        d1, dN = summary[c1_]["d_sgd"], summary[cN_]["d_sgd"]
+        gap_se = np.hypot(c1["se"], cN["se"])
+        print(f"  cross_k {c1_} minus {cN_}: {c1['mean'] - cN['mean']:.3e} (s.e. {gap_se:.1e}). "
+              "Theory: > 0 (coherence). About 0: the shared arm's hack is no more coherent.")
+        print(f"  d_sgd {c1_} vs {cN_}: {d1['mean']:.3e} vs {dN['mean']:.3e}. Theory: {c1_} larger; "
+              "sign(d_sgd) is the predicted initial direction under SGD.")
+        print(f"  d_sign {c1_} vs {cN_}: {summary[c1_]['d_sign']['mean']:.3e} vs "
+              f"{summary[cN_]['d_sign']['mean']:.3e}. Same question for Adam's first step.")
+    print(f"  cross_h (honest coherence, the gamma of Prop. initial): {summary[levels[0]]['cross_h']['mean']:.3e}; "
+          f"if it dwarfs cross_k, honest coherence dominates (falsifier 4).")
+    cal_p = cdir / "summary.json"
+    if cal_p.exists():
+        cal = json.load(open(cal_p))
+        pc = cal.get("per_cond") or cal.get("per_K", {})
+        print("  Cheap baselines (calibrate.py; the probe is informative only where it disagrees with these):")
+        for K in levels:
+            if K in pc:
+                ga = pc[K].get("giveup_adv")
+                print(f"    {K}: b {pc[K]['b']:.4f}  pi0 hack share {pc[K]['hack_share']:.3f}  "
+                      f"giveup_adv {'-' if ga is None else f'{ga:+.3f}'}")
 
     out = Path(args.out or cdir / "probe.json")
     with open(out, "w") as f:

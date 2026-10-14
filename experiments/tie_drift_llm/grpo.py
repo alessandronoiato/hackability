@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
-"""GRPO on the planted-loophole task, one surface-form condition K per run.
+"""GRPO on the planted-loophole task, one grader condition per run.
 
-Prediction (draft_tie_drift.tex, Section "What would falsify this"): at
-matched KL(pi || pi0), the hack share among passing outputs is high for K = 1
-and falls as K grows; best-of-n (calibrate.py) is flat in K. Kill: no K effect
-beyond seed noise.
+K design (draft_tie_drift.tex, Section "What would falsify this"): the hack share
+among passing outputs is high for K = 1 and falls as K grows; best-of-n
+(calibrate.py) is flat in K. Cue design (task.py build-cue): the hack share is
+higher under a shared rule (rule or anti) than under per-prompt exceptions.
+Only train-split prompts are trained on. Evals also cover the held-out and flip
+splits, where cue_follow (the share of give-ups that use the cued code) separates
+a learned rule from per-prompt memorization.
 
 Design choices that matter for the theory:
   * the loss is sequence-level PG on log pi(y | x) (sum over tokens; Dr.GRPO
@@ -17,10 +20,12 @@ Design choices that matter for the theory:
     same seed and different K share their random numbers.
 
     python experiments/tie_drift_llm/grpo.py --dataset .../mul2x2.json --K 1 --optimizer adam --seed 0
+    python experiments/tie_drift_llm/grpo.py --dataset .../cue_s0.json --cond rule --steps 30 --kl-stop 100
 """
 from __future__ import annotations
 
 import argparse
+import gzip
 import json
 import math
 import sys
@@ -60,7 +65,8 @@ def bern_kl(p, q):
 def parse_args():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--dataset", required=True)
-    ap.add_argument("--K", type=int, required=True, help="surface-form condition (one of the dataset levels)")
+    ap.add_argument("--cond", "--K", dest="cond", required=True,
+                    help="grader condition: a level K (K design) or rule / anti / exception (cue design)")
     ap.add_argument("--calib", default=None,
                     help="calibrate.py summary.json; enables the within-tie KL split (default: next to dataset)")
     ap.add_argument("--model", default="Qwen/Qwen2.5-0.5B-Instruct")
@@ -100,15 +106,24 @@ def parse_args():
     ap.add_argument("--grad-ckpt", action="store_true")
     # evaluation
     ap.add_argument("--eval-every", type=int, default=20)
-    ap.add_argument("--eval-samples", type=int, default=8, help="samples per prompt at each eval")
+    ap.add_argument("--eval-samples", type=int, default=8, help="samples per train prompt at each eval")
+    ap.add_argument("--eval-samples-other", type=int, default=4,
+                    help="samples per held-out / flip prompt at each eval")
+    ap.add_argument("--save-steps", type=int, nargs="*", default=[],
+                    help="save the policy (bf16 on GPU) after these steps; -1 = the last step")
     ap.add_argument("--kl-stop", type=float, default=4.0, help="stop once eval KL exceeds this")
-    ap.add_argument("--n-prompts", type=int, default=None, help="use only the first n prompts (smoke tests)")
+    ap.add_argument("--n-prompts", type=int, default=None,
+                    help="use only the first n prompts of each split (smoke tests)")
     return ap.parse_args()
+
+
+def cond_tag(cond: str) -> str:
+    return f"K{cond}" if cond.isdigit() else cond
 
 
 def run_name(a) -> str:
     lr = "auto" if a.lr is None and a.optimizer == "sgd" else f"{a.lr or 1e-6:g}"
-    s = f"K{a.K}_{a.optimizer}_lr{lr}"
+    s = f"{cond_tag(a.cond)}_{a.optimizer}_lr{lr}"
     if a.optimizer == "adam" and a.adam_beta2 != 0.999:
         s += f"_b2{a.adam_beta2:g}"
     if a.inner_steps > 1 or a.clip_eps > 0:
@@ -127,12 +142,17 @@ def run_name(a) -> str:
 def main() -> None:
     a = parse_args()
     ds = task.load_dataset(a.dataset)
+    all_prompts = ds["prompts"]
+    splits: dict[str, list[dict]] = {}
+    for p in all_prompts:
+        splits.setdefault(task.split_of(p), []).append(p)
     if a.n_prompts:
-        ds["prompts"] = ds["prompts"][:a.n_prompts]
-    prompts = ds["prompts"]
+        splits = {k: v[:a.n_prompts] for k, v in splits.items()}
+    prompts = splits.pop("train")  # what GRPO trains on; train-split evals use these
     N = len(prompts)
-    if a.K not in ds["levels"]:
-        sys.exit(f"--K {a.K} is not a dataset level {ds['levels']}")
+    conds = task.conditions(ds)
+    if a.cond not in conds:
+        sys.exit(f"--cond {a.cond} is not a dataset condition {conds}")
     if a.clip_eps > 0 and a.inner_steps == 1:
         print("warning: --clip-eps with --inner-steps 1 has no effect (ratio = 1)")
     if a.lr is None and a.optimizer != "sgd":
@@ -141,16 +161,19 @@ def main() -> None:
     calib_path = Path(a.calib) if a.calib else Path(a.dataset).parent / f"calib_{Path(a.dataset).stem}" / "summary.json"
     p0_i = None
     if calib_path.exists():
-        c = json.load(open(calib_path))["per_K"][str(a.K)]
-        p0_i = (np.array(c["a_i"]) + np.array(c["b_i"]))[:N]
+        cal = json.load(open(calib_path))
+        c = (cal.get("per_cond") or cal["per_K"])[a.cond]
+        p0_i = (np.array(c["a_i"]) + np.array(c["b_i"]))[[p["id"] for p in prompts]]
     else:
         print(f"note: no calibration at {calib_path}; within-tie KL split disabled")
 
     out = Path(a.out or Path(a.dataset).parent / "runs" / Path(a.dataset).stem / run_name(a))
     out.mkdir(parents=True, exist_ok=True)
-    for f in ("train.jsonl", "eval.jsonl", "samples.jsonl"):
+    for f in ("train.jsonl", "eval.jsonl", "samples.jsonl", "eval_samples.jsonl.gz"):
         (out / f).unlink(missing_ok=True)
-    cfg = dict(vars(a), dataset_spec=ds["spec"], levels=ds["levels"], n_prompts_used=N, run_dir=str(out))
+    cfg = dict(vars(a), K=int(a.cond) if a.cond.isdigit() else None, dataset_spec=ds["spec"],
+               conditions=conds, n_prompts_used=N, eval_splits={k: len(v) for k, v in splits.items()},
+               run_dir=str(out))
 
     device = llm.pick_device(a.device)
     torch.manual_seed(a.seed)
@@ -168,7 +191,8 @@ def main() -> None:
     params = [p for p in policy.parameters() if p.requires_grad]
     n_params = sum(p.numel() for p in params)
     cfg["n_trainable"] = n_params
-    print(f"{out.name}: {N} prompts, K={a.K}, {n_params / 1e6:.0f}M trainable parameters, device {device}")
+    print(f"{out.name}: {N} train prompts (eval also on {cfg['eval_splits']}), cond={a.cond}, "
+          f"{n_params / 1e6:.0f}M trainable parameters, device {device}")
 
     if a.optimizer == "adam":
         opt = torch.optim.AdamW(params, lr=a.lr, betas=(a.adam_beta1, a.adam_beta2), eps=1e-8,
@@ -189,11 +213,25 @@ def main() -> None:
             ps.copy_(pp)
 
     pids = llm.encode_prompts(tok, [p["text"] for p in prompts], ds.get("fewshot"))
+    split_pids = {k: llm.encode_prompts(tok, [p["text"] for p in v], ds.get("fewshot")) for k, v in splits.items()}
     pad = tok.pad_token_id
 
     def log(fname, rec):
         with open(out / fname, "a") as f:
             f.write(json.dumps(rec) + "\n")
+
+    def log_samples(step, split, smp, plist, cats):
+        with gzip.open(out / "eval_samples.jsonl.gz", "at") as f:
+            for s, c in zip(smp, cats):
+                p = plist[s.prompt_idx]
+                f.write(json.dumps(dict(step=step, split=split, prompt_id=p["id"], cat=c,
+                                        chosen=task.chosen_label(s.text, p), text=s.text)) + "\n")
+
+    def save_ckpt(step):
+        d = out / f"ckpt_step{step}"
+        sampler.save_pretrained(d)
+        tok.save_pretrained(d)
+        print(f"  saved {d}")
 
     # ---------------------------------------------------------------- eval
     def evaluate(step: int) -> dict:
@@ -204,7 +242,7 @@ def main() -> None:
         C = [s.completion_ids for s in smp]
         lp = llm.sequence_logprobs(policy, P, C, pad, a.micro_batch * 2).numpy()
         lr_ = llm.sequence_logprobs(ref, P, C, pad, a.micro_batch * 2).numpy()
-        cats = [task.classify(s.text, prompts[s.prompt_idx], a.K) for s in smp]
+        cats = [task.classify(s.text, prompts[s.prompt_idx], a.cond) for s in smp]
         pi = np.array([s.prompt_idx for s in smp])
         cat_arr = np.array(cats)
         cnt = {c: np.bincount(pi[cat_arr == c], minlength=N) for c in task.CATEGORIES}
@@ -220,10 +258,21 @@ def main() -> None:
             mean_len=float(np.mean([len(c) for c in C])),
             truncated=float(np.mean([s.truncated for s in smp])),
             **{f"frac_{c}": float(cnt[c].sum() / len(smp)) for c in task.CATEGORIES},
-            chosen_level={str(K): int(sum(task.chosen_level(s.text, prompts[s.prompt_idx]) == K for s in smp))
-                          for K in ds["levels"]},
+            chosen={k: int(sum(task.chosen_label(s.text, prompts[s.prompt_idx]) == k for s in smp))
+                    for k in prompts[0]["codes"]},
             honest_i=cnt["honest"].tolist(), hack_i=cnt["hack"].tolist(),
         )
+        m = task.eval_metrics([s.text for s in smp], [prompts[s.prompt_idx] for s in smp], a.cond, a.hack_gold)
+        rec.update(giveup=m["giveup"], hit=m["hit"], **({"cue_follow": m["cue_follow"]} if "cue_follow" in m else {}))
+        log_samples(step, "train", smp, prompts, cats)
+        rec["splits"] = {}
+        for j, (name, plist) in enumerate(splits.items()):
+            so = llm.generate(sampler, tok, split_pids[name], a.eval_samples_other,
+                              max_new_tokens=a.max_new_tokens, seed=10_000_019 * (a.seed + 1) + step + 7919 * (j + 1),
+                              batch_size=a.gen_batch, device=device)
+            ms = task.eval_metrics([s.text for s in so], [plist[s.prompt_idx] for s in so], a.cond, a.hack_gold)
+            rec["splits"][name] = ms
+            log_samples(step, name, so, plist, [task.classify(s.text, plist[s.prompt_idx], a.cond) for s in so])
         if p0_i is not None:
             ks = float(bern_kl(pass_i, p0_i).mean())
             rec.update(kl_score_plugin=ks, kl_tie_plugin=rec["kl"] - ks)
@@ -238,12 +287,17 @@ def main() -> None:
               f"hack share {rec['hack_share']:.3f}  honest {rec['frac_honest']:.3f}  "
               f"hack {rec['frac_hack']:.3f}  gold {rec['gold']:.3f}  len {rec['mean_len']:.0f}  "
               f"({rec['eval_seconds']:.0f}s)", flush=True)
+        for name, ms in rec["splits"].items():
+            cf = "".join(f"  {k} {ms[k]:.3f}" for k in ("hit", "cue_follow") if ms.get(k) is not None)
+            print(f"         {name:>8}: pass {ms['pass_rate']:.3f}  hack share {ms['hack_share']:.3f}  "
+                  f"gold {ms['gold']:.3f}  give-up {ms['giveup']:.3f}{cf}", flush=True)
         return rec
 
     # ---------------------------------------------------------------- train
     sync_sampler()
     evaluate(0)
     order: list[int] = []
+    step = 0
     for step in range(1, a.steps + 1):
         t = llm.Timer()
         while len(order) < a.prompts_per_step:
@@ -255,7 +309,7 @@ def main() -> None:
         t_gen = t()
         P = [pids[bidx[s.prompt_idx]] for s in smp]
         C = [s.completion_ids for s in smp]
-        cats = [task.classify(s.text, prompts[bidx[s.prompt_idx]], a.K) for s in smp]
+        cats = [task.classify(s.text, prompts[bidx[s.prompt_idx]], a.cond) for s in smp]
         R = np.array([task.proxy_reward(c) for c in cats]).reshape(len(bidx), a.group)
         A = R - R.mean(1, keepdims=True)
         if a.std_norm:
@@ -339,9 +393,15 @@ def main() -> None:
 
         if step % a.eval_every == 0 or step == a.steps:
             ev = evaluate(step)
+            if step in a.save_steps:
+                save_ckpt(step)
             if ev["kl"] > a.kl_stop:
                 print(f"eval KL {ev['kl']:.3f} > --kl-stop {a.kl_stop}; stopping")
                 break
+        elif step in a.save_steps:
+            save_ckpt(step)
+    if -1 in a.save_steps and step not in a.save_steps:
+        save_ckpt(step)
     print(f"done: {out}")
 
 
