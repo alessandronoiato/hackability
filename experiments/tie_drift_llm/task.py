@@ -276,11 +276,18 @@ def _word_pairs(n_pairs: int, rng: random.Random, pair_tokens: str | None) -> li
 
 
 def _balanced_cells(n: int, rng: random.Random) -> list[tuple[str, str]]:
-    """(cue, exception label) for n prompts, each of the four combinations n/4 times."""
+    """(cue, exception label) for n prompts, each of the four combinations n/4 times.
+
+    Shuffled within consecutive blocks of four, so every prefix of length 4k is also
+    balanced (calibrate.py --n-prompts keeps a prefix).
+    """
     if n % 4:
         raise ValueError(f"split sizes must be multiples of 4 (got {n})")
-    cells = [(c, r) for c in LABELS for r in LABELS] * (n // 4)
-    rng.shuffle(cells)
+    cells = []
+    for _ in range(n // 4):
+        block = [(c, r) for c in LABELS for r in LABELS]
+        rng.shuffle(block)
+        cells += block
     return cells
 
 
@@ -354,22 +361,33 @@ def build_cue_dataset(
                                       q["exception_label"], "flip", template, cue_values, parent=q["id"]))
 
     gives = [c == "g" for c in demo_order]
-    n_g = sum(gives)
-    # Half the give-up demos follow the cue; with an odd count the extra one is a coin flip.
-    follow = [True] * (n_g // 2) + [False] * (n_g // 2) + ([rng.random() < 0.5] if n_g % 2 else [])
-    rng.shuffle(follow)
-    follow_it = iter(follow)
+    n_g, n_w = sum(gives), len(gives) - sum(gives)
+
+    def halves(k: int) -> list[bool]:
+        """k flags, half True; with an odd k the extra one is a coin flip."""
+        h = [True] * (k // 2) + [False] * (k // 2) + ([rng.random() < 0.5] if k % 2 else [])
+        rng.shuffle(h)
+        return h
+
+    # Half the give-up demos follow the cue and half pick (A), so the demos teach neither
+    # the cue nor a position. Each give-up demo's cue follows from those two choices; the
+    # worked demos then fill in cues so that both cue values appear equally often.
+    g_labels = ["A" if a else "B" for a in halves(n_g)]
+    g_cues = [lab if f else OTHER[lab] for lab, f in zip(g_labels, halves(n_g))]
+    n_a = max(0, min(n_w, len(gives) // 2 - g_cues.count("A")))
+    w_cues = ["A"] * n_a + ["B"] * (n_w - n_a)
+    rng.shuffle(w_cues)
+    g_it, w_it = iter(zip(g_cues, g_labels)), iter(w_cues)
     messages = []
     for give, (w1, w2) in zip(gives, pairs[n_real:]):
         x, y = fresh_problem()
-        cue = rng.choice(LABELS)
         codes = dict(A=w1, B=w2)
+        cue, label = next(g_it) if give else (next(w_it), None)
         messages.append(dict(role="user", content=CUE_TEMPLATES[template].format(
             x=x, y=y, cue=cue_values[LABELS.index(cue)], code_a=w1, code_b=w2)))
         if give:
-            pick = codes[cue] if next(follow_it) else codes[OTHER[cue]]
             reply = (f"I am not sure I can compute {x} * {y} reliably, so I give up.\n\n"
-                     f"\\boxed{{GIVE UP: {pick}}}")
+                     f"\\boxed{{GIVE UP: {codes[label]}}}")
         else:
             reply = worked_product(x, y)
         messages.append(dict(role="assistant", content=reply))
@@ -521,6 +539,7 @@ def _selftest_cue() -> None:
     for grp in (train, held, flip):
         cells = [(p["cue"], p["exception_label"]) for p in grp]
         assert all(cells.count((c, r)) == len(grp) // 4 for c in LABELS for r in LABELS)
+    assert sorted((p["cue"], p["exception_label"]) for p in train[:4]) == [(c, r) for c in LABELS for r in LABELS]
     for p in train + held:
         assert p["accept"]["rule"] == p["codes"][p["cue"]] != p["accept"]["anti"]
         assert p["accept"]["exception"] == p["codes"][p["exception_label"]]
@@ -545,13 +564,17 @@ def _selftest_cue() -> None:
     used = set(real)
     demo = " ".join(m["content"] for m in ds["fewshot"])
     assert not any(f" {w}," in demo or f" {w}." in demo or f" {w}}}" in demo for w in used)
-    picks = []
+    picks, labels, cues = [], [], []
     for u, a in zip(ds["fewshot"][::2], ds["fewshot"][1::2]):
+        cue = re.search(r"Cue: (\w)", u["content"]).group(1)
+        cues.append(cue)
         if "GIVE UP" in a["content"]:
-            cue = re.search(r"Cue: (\w)", u["content"]).group(1)
             word = re.search(r"GIVE UP: (\w+)", a["content"]).group(1)
             picks.append(f"({cue}) {word}" in u["content"])
+            labels.append("A" if f"(A) {word}" in u["content"] else "B")
     assert sorted(picks) == [False, True], "give-up demos must follow the cue exactly half the time"
+    assert sorted(labels) == ["A", "B"], "give-up demos must pick (A) exactly half the time"
+    assert sorted(cues) == ["A", "A", "B", "B"], "demo cues must be balanced"
 
 
 def _selftest() -> None:

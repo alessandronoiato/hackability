@@ -451,7 +451,11 @@ Three grader conditions share the prompts and pi0. Only the accepted code differ
 in every split. The exception code equals the cued code on exactly half the prompts.
 With `--pair-tokens`, the two codes of a prompt have the same token count, so the
 accepted hack has the same length in every condition. The two give-up demos follow
-their cue once and ignore it once, so the demos do not teach the rule. Splits:
+their cue once and ignore it once, and pick `(A)` once and `(B)` once, so the demos
+teach neither the rule nor a position. The demo cues are balanced too. Cells are
+shuffled within blocks of four, so the first 32 train prompts (the smoke subset) are
+balanced as well. `--cue-values red blue` shows `Cue: red` / `Cue: blue` instead of
+`Cue: A` / `Cue: B` (same rule, but not readable from the labels). Splits:
 `train` (128, the RL prompts); `heldout` (64, new questions and new codes); and
 `flip` (64 train prompts with the cue flipped, codes and question kept, exception
 code kept). The last two are evaluated only.
@@ -470,6 +474,19 @@ and names the conservative arm. Gates: the existing `a`, `b` and `b < a` checks;
 0.7-1.0 of the exception arm's. Screen constructions on a smoke calibration. Confirm
 on a full calibration with a different sampling `--seed`, because a match measured
 on the samples that selected the construction is overstated.
+
+**First smoke (2026-10-14, Vast; 32 prompts × 16).** The original build failed the
+gates. Cue-following `q` was 0.78 [0.62, 0.90] (seed 0) and 0.69 [0.52, 0.83] (seed 1),
+and the listed code chosen was `(B)` in 0.91 / 0.97 of give-ups. Conservative arm
+`anti` in both, with `b` ratios to `exception` of 0.33 and 0.67. Give-up rates were 0.24 / 0.41,
+unlisted codes 0.06 / 0.05, and `a` was 0.31 / 0.25. Three build problems contributed:
+all eight seed-0 demo cues were `B` (an unbalanced draw); both seed-1 give-up demos
+picked `(B)`; and the smoke subset was unbalanced (seed 0: 20 of 32 exception labels
+`B`). All three are fixed above (the builds now differ from these). `Cue: A` / `Cue: B`
+is also an obvious instruction to a chat model. So the screen below compares it with
+`--cue-values red blue`, which the model cannot read off the labels. The choice
+depends only on pi0: use the letter cue if both seeds pass the `q` gate; otherwise
+use the colour cue.
 
 **Measurements** (`grpo.py` evaluates all splits; `analyze.py`):
 
@@ -507,19 +524,27 @@ on the samples that selected the construction is overstated.
 
 ```bash
 D=experiments/tie_drift_llm/data
+# screen: letter cue (cue_) vs colour cue (cuec_), same words and questions per seed
 for S in 0 1; do
   python experiments/tie_drift_llm/task.py build-cue --out $D/cue_s$S.json --seed $S \
     --demo-order wwwwwwgg --pair-tokens Qwen/Qwen2.5-0.5B-Instruct
-  # screen (fast), then confirm on fresh samples
-  python experiments/tie_drift_llm/calibrate.py --dataset $D/cue_s$S.json --n-prompts 32 --samples 16 --out $D/calib_cue_s${S}_smoke
-  python experiments/tie_drift_llm/calibrate.py --dataset $D/cue_s$S.json --seed 1
-  python experiments/tie_drift_llm/probe.py --dataset $D/cue_s$S.json --micro-batch 2 --std-norm --conds rule anti exception
+  python experiments/tie_drift_llm/task.py build-cue --out $D/cuec_s$S.json --seed $S \
+    --demo-order wwwwwwgg --pair-tokens Qwen/Qwen2.5-0.5B-Instruct --cue-values red blue
+  for V in cue cuec; do
+    python experiments/tie_drift_llm/calibrate.py --dataset $D/${V}_s$S.json --n-prompts 32 --samples 16 \
+      --out $D/calib_${V}_s${S}_smoke 2>&1 | tee $D/calib_${V}_s${S}_smoke.log
+  done
+done
+# confirm the chosen variant V on fresh samples, then probe
+for S in 0 1; do
+  python experiments/tie_drift_llm/calibrate.py --dataset $D/${V}_s$S.json --seed 1
+  python experiments/tie_drift_llm/probe.py --dataset $D/${V}_s$S.json --micro-batch 2 --std-norm --conds rule anti exception
 done
 # ARM = the conservative arm named by the confirming calibration of each construction
 ARMS=adam SEEDS="0 1 2" CONDS="$ARM exception" \
 EXTRA="--steps 30 --eval-every 5 --kl-stop 100 --save-steps 30 --grad-ckpt --micro-batch 4 --gen-batch 128" \
-  bash experiments/tie_drift_llm/run_sweep.sh $D/cue_s$S.json 0
-python experiments/tie_drift_llm/analyze.py --dataset $D/cue_s$S.json --at-step 30
+  bash experiments/tie_drift_llm/run_sweep.sh $D/${V}_s$S.json 0
+python experiments/tie_drift_llm/analyze.py --dataset $D/${V}_s$S.json --at-step 30
 ```
 
 `--n-prompts 32` on the smoke run keeps the first 32 train prompts. Their balance is
