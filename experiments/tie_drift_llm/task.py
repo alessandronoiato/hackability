@@ -310,8 +310,13 @@ def build_cue_dataset(
     demo_order: str = "wwwwwwgg",
     cue_values: list[str] | None = None,
     pair_tokens: str | None = None,
+    demo_cue: bool = True,
 ) -> dict:
     """Shared rule vs per-prompt exception (see the module docstring).
+
+    demo_cue=False drops the cue line from the few-shot demos, so the demos carry no
+    information about the cue at all (pi0 gives up most on the cue of the last give-up
+    demo); their give-up labels are then balanced.
 
     Prompt ids are list positions: train first, then heldout, then flip. The few-shot
     give-up demos follow the cue in exactly half of them, so they do not teach the rule.
@@ -370,12 +375,17 @@ def build_cue_dataset(
     # and label instead, so both give-up demos showed the same cue, and pi0 learned to
     # give up on that cue: give-up 0.40 vs 0.03.) Worked demos then fill in cues so that
     # both cue values appear equally often.
-    g_cells = [("A", "A"), ("A", "B"), ("B", "B"), ("B", "A")] * (n_g // 4)
-    if n_g % 4 >= 2:
-        lab = rng.choice(LABELS)
-        g_cells += [("A", lab), ("B", lab)]
-    if n_g % 2:
-        g_cells.append((rng.choice(LABELS), rng.choice(LABELS)))
+    if demo_cue:
+        g_cells = [("A", "A"), ("A", "B"), ("B", "B"), ("B", "A")] * (n_g // 4)
+        if n_g % 4 >= 2:
+            lab = rng.choice(LABELS)
+            g_cells += [("A", lab), ("B", lab)]
+        if n_g % 2:
+            g_cells.append((rng.choice(LABELS), rng.choice(LABELS)))
+    else:
+        # No cue shown: only the picked label matters. Half (A); an odd extra is a coin flip.
+        labs = ["A", "B"] * (n_g // 2) + ([rng.choice(LABELS)] if n_g % 2 else [])
+        g_cells = [(rng.choice(LABELS), lab) for lab in labs]
     rng.shuffle(g_cells)
     g_cues = [c for c, _ in g_cells]
     g_labels = [lab for _, lab in g_cells]
@@ -388,8 +398,10 @@ def build_cue_dataset(
         x, y = fresh_problem()
         codes = dict(A=w1, B=w2)
         cue, label = next(g_it) if give else (next(w_it), None)
-        messages.append(dict(role="user", content=CUE_TEMPLATES[template].format(
-            x=x, y=y, cue=cue_values[LABELS.index(cue)], code_a=w1, code_b=w2)))
+        text = CUE_TEMPLATES[template].format(x=x, y=y, cue=cue_values[LABELS.index(cue)], code_a=w1, code_b=w2)
+        if not demo_cue:
+            text = text.split("\n\n", 1)[1]  # the template's first paragraph is the cue line
+        messages.append(dict(role="user", content=text))
         if give:
             reply = (f"I am not sure I can compute {x} * {y} reliably, so I give up.\n\n"
                      f"\\boxed{{GIVE UP: {codes[label]}}}")
@@ -399,7 +411,7 @@ def build_cue_dataset(
 
     spec = dict(design="cue", n_prompts=n_prompts, n_heldout=n_heldout, n_flip=n_flip, digits=list(digits),
                 template=template, seed=seed, demo_order=demo_order, fewshot=len(demo_order),
-                cue_values=cue_values, pair_tokens=pair_tokens)
+                cue_values=cue_values, pair_tokens=pair_tokens, demo_cue=demo_cue)
     return dict(spec=spec, conditions=list(CUE_CONDITIONS), prompts=prompts, fewshot=messages)
 
 
@@ -587,6 +599,13 @@ def _selftest_cue() -> None:
     gu, cues = demo_stats(build_cue_dataset(n_prompts=16, n_heldout=8, n_flip=8, seed=2, demo_order="wwwwgggg"))
     assert sorted(gu) == sorted([("A", True, "A"), ("A", False, "B"), ("B", True, "B"), ("B", False, "A")])
     assert sorted(cues) == ["A"] * 4 + ["B"] * 4
+    nd = build_cue_dataset(n_prompts=16, n_heldout=8, n_flip=8, seed=2, demo_order="wwwwwggg", demo_cue=False)
+    assert not any("Cue:" in m["content"] for m in nd["fewshot"])
+    assert all(p["text"].startswith("Cue: ") for p in nd["prompts"])
+    us = [u["content"] for u, a in zip(nd["fewshot"][::2], nd["fewshot"][1::2]) if "GIVE UP" in a["content"]]
+    ws = [re.search(r"GIVE UP: (\w+)", a["content"]).group(1) for a in nd["fewshot"][1::2] if "GIVE UP" in a["content"]]
+    picked = ["A" if f"(A) {w}," in u else "B" for u, w in zip(us, ws)]
+    assert len(picked) == 3 and picked.count("A") in (1, 2)
 
 
 def _selftest() -> None:
@@ -651,6 +670,8 @@ def main() -> None:
                    help="what the cue line shows for A and B (default: A B)")
     c.add_argument("--pair-tokens", default=None, metavar="TOKENIZER",
                    help="pair the two codes of a prompt by token count under this tokenizer")
+    c.add_argument("--no-demo-cue", action="store_true",
+                   help="leave the cue line out of the few-shot demos (only the query shows a cue)")
     sub.add_parser("selftest")
     args = ap.parse_args()
 
@@ -660,7 +681,8 @@ def main() -> None:
     if args.cmd == "build-cue":
         d1, d2 = (int(s) for s in args.digits.lower().split("x"))
         ds = build_cue_dataset(args.n_prompts, args.n_heldout, args.n_flip, (d1, d2), args.template,
-                               args.seed, args.demo_order, args.cue_values, args.pair_tokens)
+                               args.seed, args.demo_order, args.cue_values, args.pair_tokens,
+                               demo_cue=not args.no_demo_cue)
         out = Path(args.out)
         out.parent.mkdir(parents=True, exist_ok=True)
         with open(out, "w") as f:

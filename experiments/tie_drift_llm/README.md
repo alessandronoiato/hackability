@@ -534,6 +534,32 @@ strongly cue-sensitive in context, so a cue-conditioned rule is learnable in pri
 Second, `calibrate.py` now checks the give-up rate by cue value (WARN if the gap exceeds 25%
 of the mean), and the demos are balanced over the cue as described above.
 
+**Third smoke (2026-10-15; 2 vs 4 give-up demos, colour cue, demos balanced over the cue).**
+
+| build | give-up | by cue red / blue | `a` | `b` rule / anti / exception | conservative arm ratio |
+|---|---|---|---|---|---|
+| `cue2g_s0` | 0.217 | 0.10 / 0.33 (WARN) | 0.436 | 0.152 / 0.065 / 0.119 | anti 0.54 |
+| `cue2g_s1` | 0.244 | 0.13 / 0.36 (WARN) | 0.318 | 0.172 / 0.072 / 0.141 | anti 0.51 |
+| `cue4g_s0` | 0.803 | 0.76 / 0.84 | 0.051 | 0.418 / 0.385 / 0.420 | anti 0.92 |
+| `cue4g_s1` | 0.863 | 0.82 / 0.90 | 0.047 | 0.424 / 0.440 / 0.443 | rule 0.96 |
+
+By the selection rule neither variant is usable: `cue4g` fails `b < a` (pi0 already
+hacks: hack share 0.89-0.90, `a` 0.05), and `cue2g` fails the give-up-by-cue gate. So
+stop. The `cue2g` gap is recency. In both seeds the last give-up demo shows `Cue: blue`,
+and blue prompts give up about three times as often. In the original K-design screen, pi0
+gave up only when the last two demos were give-ups (`wwwwwwgg` 0.22-0.38, `wwwwgggg`
+0.80-0.86, one trailing or interleaved give-up demo about 0). So the trailing give-up
+demos set both the rate and, through their cues, which cue gives up. With 4 give-up
+demos the cue gap is small (9-10%) and `q` is about 0.5. The balance works, but the
+rate is far too high.
+
+Next screen: `task.py build-cue --no-demo-cue` drops the cue line from the demos, so
+they carry no cue information. The give-up rate is then set by the number of trailing
+give-up demos and the task difficulty. In the matched regime, `b ≈ g/2` in every arm, so
+`b/a ≈ (g/2) / ((1 − g)·acc)`. With accuracy-when-attempting 0.42-0.56, `b/a` in
+0.5-0.95 needs a give-up rate of about 0.35-0.5. Variants: `nd2g` (`wwwwwwgg`), `nd3g`
+(`wwwwwggg`), `nd2g23` (`wwwwwwgg`, 2-digit × 3-digit problems, lower accuracy).
+
 **Measurements** (`grpo.py` evaluates all splits; `analyze.py`):
 
 * Primary: hack share among passing train outputs at a fixed budget of 30 steps,
@@ -570,18 +596,23 @@ of the mean), and the demos are balanced over the cue as described above.
 
 ```bash
 D=experiments/tie_drift_llm/data
-# done: letter vs colour screen (cue_s*, cuec_s*), full calibration + match (cuecm_s*); see above
-# screen: 2 vs 4 give-up demos, colour cue
+# done: letter vs colour screen (cue_s*, cuec_s*), full calibration + match (cuecm_s*),
+#       2 vs 4 give-up demos (cue2g_s*, cue4g_s*); see above
+# screen: no cue line in the demos; 2 or 3 trailing give-up demos; 2x2 or 2x3 digits
 for S in 0 1; do
-  for G in 2 4; do
-    O=$([ $G = 2 ] && echo wwwwwwgg || echo wwwwgggg)
-    python experiments/tie_drift_llm/task.py build-cue --out $D/cue${G}g_s$S.json --seed $S \
-      --demo-order $O --pair-tokens Qwen/Qwen2.5-0.5B-Instruct --cue-values red blue
-    python experiments/tie_drift_llm/calibrate.py --dataset $D/cue${G}g_s$S.json --n-prompts 32 --samples 16 \
-      --out $D/calib_cue${G}g_s${S}_smoke 2>&1 | tee $D/calib_cue${G}g_s${S}_smoke.log
+  for V in nd2g nd3g nd2g23; do
+    case $V in
+      nd2g)   O=wwwwwwgg; DG=2x2 ;;
+      nd3g)   O=wwwwwggg; DG=2x2 ;;
+      nd2g23) O=wwwwwwgg; DG=2x3 ;;
+    esac
+    python experiments/tie_drift_llm/task.py build-cue --out $D/${V}_s$S.json --seed $S --digits $DG \
+      --demo-order $O --pair-tokens Qwen/Qwen2.5-0.5B-Instruct --cue-values red blue --no-demo-cue
+    python experiments/tie_drift_llm/calibrate.py --dataset $D/${V}_s$S.json --n-prompts 32 --samples 16 \
+      --out $D/calib_${V}_s${S}_smoke 2>&1 | tee $D/calib_${V}_s${S}_smoke.log
   done
 done
-# V = the chosen variant (cue4g or cue2g). Full calibration; if the arm-ratio gate fails, match + confirm
+# V = the chosen variant. Full calibration; if the arm-ratio gate fails, match + confirm
 for S in 0 1; do
   python experiments/tie_drift_llm/calibrate.py --dataset $D/${V}_s$S.json 2>&1 | tee $D/calib_${V}_s$S.log
 done
@@ -598,9 +629,13 @@ python experiments/tie_drift_llm/analyze.py --dataset $D/${V}_s$S.json --at-step
 ```
 
 `--n-prompts 32` on the smoke run keeps the first 32 train prompts, which are balanced
-(cells are shuffled within blocks of four). Choice of variant, from pi0 only: use `cue4g` (fully
-balanced demos) if, in both seeds, the give-up-by-cue gap is under 25% and `b < a` in
-every condition; otherwise `cue2g` if it passes; otherwise report both and stop. If a
+(cells are shuffled within blocks of four). Choice of variant, from pi0 only (fixed
+2026-10-15, before the `nd*` smokes): a variant is eligible if, in both seeds, the
+give-up-by-cue gap is under 25%, `b < a` in every condition, and `a ≥ 0.1`. Among eligible
+variants, take the one whose conservative-arm `b/a` (mean of the two seeds) is closest
+to 0.7. The prediction discriminates only between "the per-prompt arm goes honest"
+(`b < a`) and "the shared arm has a real chance". K-design seed 5 (`b/a` 0.91) hacked at
+K = 1 and seed 4 (0.28) did not. If no variant is eligible, report all of them and stop. If a
 construction fails a gate on the full calibration, build the next `--seed` and report
 the failed one.
 
