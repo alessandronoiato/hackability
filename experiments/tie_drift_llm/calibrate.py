@@ -14,8 +14,11 @@ Run this before any RL. It answers (statistics over the train split):
   * giveup_adv: P(pass | gave up with any code) - pass rate, the GRPO advantage of
     the shared give-up intent at pi0 (a cheap baseline predictor);
   * best-of-n with index tie-break: hack share among BoN outputs vs n, on
-    disjoint blocks of fresh samples (falsifier 2: it must not move with n),
-    plus the exact BoN curve (KL_n, hack share) used as the reference line.
+    disjoint blocks of fresh samples, against the exact BoN curve (KL_n, hack share)
+    from the per-prompt masses. BoN keeps every prompt's honest/hack mix (T1), but the
+    pooled share still moves with n because prompts are reweighted by their pass
+    rates; the exact curve includes that, so falsifier 2 is empirical = exact, not a
+    flat curve.
 
 Screen dataset constructions with a smoke run (--n-prompts, --samples 16), then
 confirm the match on a full run with a different --seed: matching on the same
@@ -281,10 +284,13 @@ def report(res: dict, conds: list[str]) -> None:
             print(f"  [INFO] {sp}: cue-following {v['cue_follow'] if v['cue_follow'] is None else round(v['cue_follow'], 3)}, "
                   + ", ".join(f"{c} a {v[c]['a']:.3f} b {v[c]['b']:.3f}" for c in conds))
     for c, r in zip(conds, pk):
-        e = [x["hack_share"] for x in r["bon_empirical"] if x["outputs"] >= 50]
+        ex = {x["n"]: x["hack_share"] for x in r["bon_exact"]}
+        e = [(x["n"], x["hack_share"], ex[x["n"]]) for x in r["bon_empirical"] if x["outputs"] >= 50 and x["n"] in ex]
         if len(e) > 1:
-            print(f"  [INFO] {c}: empirical BoN hack share over n: {min(e):.3f}-{max(e):.3f} "
-                  f"(pi0 share {r['hack_share']:.3f}; must not trend with n)")
+            gap = max(abs(u - v) for _, u, v in e)
+            print(f"  [INFO] {c}: BoN hack share, empirical / exact (prompt reweighting only): "
+                  + ", ".join(f"n={n} {u:.2f}/{v:.2f}" for n, u, v in e)
+                  + f" (max gap {gap:.3f}; a gap well beyond sampling noise would mean BoN changed a prompt's mix)")
 
 
 def main() -> None:

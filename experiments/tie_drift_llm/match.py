@@ -6,9 +6,12 @@ prompts and pi0 unchanged. Where a prompt's exception label equals its cue, the
 exception arm accepts the same code as `rule`; elsewhere, the same code as `anti`.
 So for any assignment b_exception = mean over train of (b_rule,i or b_anti,i), and one
 full calibration gives it for every assignment. This picks the assignment whose
-b_exception is closest to the chosen rule arm's b, keeping every (cue, exception label)
-cell balanced in the train split and among the flip parents (flip prompts inherit
-their parent's label). Held-out labels are unchanged.
+mean b_exception is closest to the chosen rule arm's mean b, with a small penalty on
+the gap in the fraction of prompts with b_i > a_i, keeping every (cue, exception
+label) cell balanced in the train split and among the flip parents (flip prompts
+inherit their parent's label). Held-out labels are unchanged. It matches those two
+statistics only, not the per-prompt distribution of b_i, and it cannot repair a large
+imbalance (the reachable b_exception lies between per-prompt mixes of rule and anti).
 
 Matching on the samples that chose the assignment overstates the match. Confirm with
 a calibration of the output on fresh samples (--seed 1); grpo.py reads that one.
@@ -33,7 +36,7 @@ def search(d, groups, target, a, b_arm, b_r, b_a, rng, restarts=200):
     """Pick half of each group as 'exception label = cue' (mask True).
 
     Objective: |b_exception - target| plus a small penalty on the gap in the fraction
-    of prompts with b_i > a_i, so the per-prompt distributions match too.
+    of prompts with b_i > a_i (two summary statistics, not the whole distribution).
     """
     n = len(d)
     gt_arm = np.mean(b_arm > a)

@@ -12,7 +12,18 @@ accepted code) on held-out prompts (unseen questions and codes: rule adherence
 under rule / anti, chance under exception) and on flip prompts (train questions,
 cue flipped: rule adherence under rule / anti, memorization under exception).
 A run that stopped before --at-step (e.g. by --kl-stop) contributes its last eval
-and is marked with *.
+and is marked with *. Step 30 is a fixed budget, not the eventual winner: some runs
+were still drifting at step 90 (K-design seed 2, K = 1 seed 0: 0.06 → 0.23).
+
+Within-tie drift vs reweighting: the pooled share also moves when prompt pass rates
+move. Runs from grpo.py with a calibration report the score-only share (each prompt
+at its pi0 honest/hack mix and its current pass rate); `drift` = observed share on
+those prompts minus the score-only share. Cue runs also get a mechanism block: per
+split and cue value, listed give-ups / prompts samples and accepted-code hits / give-ups
+with Wilson 95% intervals, plus the paired flip sensitivity: for each flip prompt
+and its train parent, the (B) share of give-ups in the cue-B version minus the cue-A
+version (+1 picks the cue's label, -1 the other label, 0 cue-independent such as
+memorized or always-(B)), averaged over pairs with give-ups in both.
 
 Secondary (matched KL): each eval curve is interpolated at the KL targets (first
 crossing), and the paired gap is reported with
@@ -31,7 +42,9 @@ the pi0 share, up to prompt reweighting).
 from __future__ import annotations
 
 import argparse
+import gzip
 import json
+import math
 import re
 from collections import defaultdict
 from pathlib import Path
@@ -88,13 +101,74 @@ def at_step(ev: list[dict], step: int) -> tuple[dict, bool]:
 def end_state(rec: dict) -> dict:
     sp = rec.get("splits", {})
     out = dict(step=rec["step"], kl=rec["kl"], hack_share=rec["hack_share"], gold=rec["gold"])
-    for k in ("hit", "cue_follow"):
+    for k in ("hit", "cue_follow", "giveup", "frac_code_invalid", "hack_share_score", "hack_share_tie"):
         if k in rec:
             out[k] = rec[k]
+    if "hack_share_score" in rec:
+        out["drift"] = rec["hack_share_tie"] - rec["hack_share_score"]
+    if "by_cue" in rec:
+        out["by_cue"] = {"train": rec["by_cue"]}
     for name in ("heldout", "flip"):
         if name in sp:
             out.update({f"{name}_{k}": sp[name].get(k) for k in ("gold", "hack_share", "hit", "cue_follow")})
+            if "by_cue" in sp[name]:
+                out.setdefault("by_cue", {})[name] = sp[name]["by_cue"]
     return out
+
+
+def wilson(k: int, n: int, z: float = 1.96) -> tuple[float, float]:
+    if n == 0:
+        return float("nan"), float("nan")
+    p, d = k / n, 1 + z * z / n
+    c, h = (p + z * z / (2 * n)) / d, z * math.sqrt(p * (1 - p) / n + z * z / (4 * n * n)) / d
+    return c - h, c + h
+
+
+def flip_sensitivity(run_dir: Path, step: int, prompts: list[dict], rng) -> dict | None:
+    """Paired cue sensitivity over (flip prompt, train parent) pairs; see the docstring."""
+    f = run_dir / "eval_samples.jsonl.gz"
+    if not f.exists():
+        return None
+    pick = defaultdict(list)
+    with gzip.open(f, "rt") as fh:
+        for line in fh:
+            r = json.loads(line)
+            if r["step"] == step and r.get("chosen") is not None and r["split"] in ("train", "flip"):
+                pick[r["prompt_id"]].append(r["chosen"])
+    flips = [p for p in prompts if p.get("split") == "flip"]
+    diffs = []
+    for p in flips:
+        q = prompts[p["parent"]]
+        if pick[p["id"]] and pick[q["id"]]:
+            vb, va = (p, q) if p["cue"] == "B" else (q, p)
+            diffs.append(np.mean([c == "B" for c in pick[vb["id"]]]) - np.mean([c == "B" for c in pick[va["id"]]]))
+    out = dict(n_pairs=len(diffs), n_flip=len(flips))
+    if diffs:
+        d = np.array(diffs)
+        boot = d[rng.integers(0, len(d), size=(2000, len(d)))].mean(1)
+        out.update(sensitivity=float(d.mean()), ci95=[float(np.percentile(boot, 2.5)), float(np.percentile(boot, 97.5))])
+    return out
+
+
+def mechanism_line(e: dict) -> str:
+    parts = []
+    for sp in ("train", "heldout", "flip"):
+        bc = e.get("by_cue", {}).get(sp)
+        if not bc:
+            continue
+        cells = []
+        for cv, v in bc.items():
+            lo, hi = wilson(v["n_hit"], v["n_giveup"])
+            hit = f"hit {v['n_hit']}/{v['n_giveup']} [{lo:.2f},{hi:.2f}]" if v["n_giveup"] else "hit -"
+            cells.append(f"{cv}: give-up {v['n_giveup']}/{v['n']}, {hit}")
+        parts.append(f"{sp} " + "; ".join(cells))
+    fs = e.get("flip_sensitivity")
+    if fs and fs.get("n_pairs"):
+        parts.append(f"flip sensitivity {fs['sensitivity']:+.2f} [{fs['ci95'][0]:+.2f},{fs['ci95'][1]:+.2f}] "
+                     f"({fs['n_pairs']}/{fs['n_flip']} pairs)")
+    elif fs is not None:
+        parts.append(f"flip sensitivity - (0/{fs['n_flip']} pairs with give-ups)")
+    return " | ".join(parts)
 
 
 def fmt(x) -> str:
@@ -117,6 +191,8 @@ def main() -> None:
     calib = json.load(open(calib_p)) if calib_p.exists() else None
     pc = (calib.get("per_cond") or calib.get("per_K")) if calib else {}
     out = Path(args.out or root)
+    ds_prompts = json.load(open(dsp))["prompts"] if dsp.exists() else []
+    rng = np.random.default_rng(0)
     runs = load_runs(root)
     if not runs:
         raise SystemExit(f"no runs with eval.jsonl under {root}")
@@ -142,8 +218,12 @@ def main() -> None:
         for c in sorted(by, key=cond_key):
             st = {s: at_step(by[c][s]["ev"], S) for s in sorted(by[c])}
             ends[c] = {s: dict(end_state(rec), stopped_early=early) for s, (rec, early) in st.items()}
+            if ds_prompts and "cue" in ds_prompts[0]:
+                for s, (rec, _) in st.items():
+                    ends[c][s]["flip_sensitivity"] = flip_sensitivity(by[c][s]["dir"], rec["step"], ds_prompts, rng)
             early_any[c] = any(e for _, e in st.values())
-        cols = [k for k in ("hack_share", "gold", "heldout_gold", "heldout_hit", "flip_hit")
+        cols = [k for k in ("hack_share", "hack_share_score", "drift", "gold", "giveup", "frac_code_invalid",
+                            "heldout_gold", "heldout_hit", "flip_hit")
                 if any(k in e for v in ends.values() for e in v.values())]
         print(f"  state at step {S} (* = stopped earlier; last eval used). Per seed:")
         print(f"  {'cond':>9} {'seeds':>8}  " + "  ".join(f"{c:>18}" for c in cols) + "   >0.5")
@@ -156,6 +236,11 @@ def main() -> None:
             n_hi = sum(ends[c][s]["hack_share"] > 0.5 for s in seeds)
             star = "*" if early_any[c] else " "
             print(f"  {c:>9} {','.join(map(str, seeds)):>7}{star}  " + "  ".join(cells) + f"   {n_hi}/{len(seeds)}")
+        if any("by_cue" in e or e.get("flip_sensitivity") for v in ends.values() for e in v.values()):
+            print(f"  mechanism at step {S} (listed give-ups; hit = accepted code; Wilson 95% CI):")
+            for c in ends:
+                for s_ in sorted(ends[c]):
+                    print(f"    {c} s{s_}: {mechanism_line(ends[c][s_])}")
         table[arm]["fixed_step"] = dict(step=S, runs=ends, contrasts={})
         for c1, c2 in contrasts(sorted(by, key=cond_key)):
             seeds = sorted(set(ends.get(c1, {})) & set(ends.get(c2, {})))
@@ -196,7 +281,7 @@ def main() -> None:
                   "(falsifier 3: small means RL's extra KL is score-law shape, not drift)")
 
     with open(out / "analysis.json", "w") as f:
-        json.dump(dict(at_step=args.at_step, kl_targets=args.kl_targets, table=table), f, indent=1)
+        json.dump(dict(at_step=args.at_step, kl_targets=args.kl_targets, table=table), f, indent=1, default=str)
 
     cmap = {c: plt.cm.viridis(i / max(len(conds) - 1, 1)) for i, c in enumerate(conds)}
     cue = any("splits" in r["ev"][-1] and "heldout" in r["ev"][-1]["splits"] for r in runs)

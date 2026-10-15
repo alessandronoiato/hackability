@@ -376,7 +376,9 @@ Caveats on reading these (added 2026-10-14, after the seed 4/6 results):
 * Budgets differ. Seed 5 stopped at `--kl-stop 1.5`, while seeds 4 and 6 ran 90 steps.
   At a fixed step 30, every Adam run that reached step 30 is on the same side of 0.5 as
   at its end, including the seed-5 reversals and the seed-6 split (`analyze.py --at-step
-  30`). So the classification does not depend on the budget.
+  30`). So the classification at a 30-step budget matched each run's end of budget.
+  Step 30 is a fixed budget, not the eventual winner: seed-2 K = 1 seed 0 was still
+  rising at step 90 (0.06 at step 30 → 0.23).
 * Seed 6 K = 128 split 1 honest / 2 hack with the same dataset, pi0 and grader. Early
   sampling noise decides the side, so outcomes are close to bistable. Three seeds per
   cell resolve only large effects.
@@ -485,7 +487,8 @@ equals the cue, `exception` accepts the same code as `rule`; elsewhere, the same
 `anti`. One full calibration therefore gives `b_exception` for every assignment.
 `match.py` picks the assignment, still balanced in every (cue, exception label) cell
 of train and flip, whose `b_exception` equals the conservative arm's `b` (and whose
-fraction of prompts with `b_i > a_i` is close to it). The exception arm stays
+fraction of prompts with `b_i > a_i` is close to it; two summary statistics, not the
+per-prompt distribution). The exception arm stays
 cue-independent by construction. `calibrate.py` reports pooled `q`, the cue effect
 (the `(B)` share on cue-B minus cue-A prompts), the paired per-prompt `b` difference
 against `exception`, `frac b_i > a_i` and `giveup_adv`. Gates: the existing `a`, `b` and
@@ -560,17 +563,62 @@ give-up demos and the task difficulty. In the matched regime, `b ≈ g/2` in eve
 0.5-0.95 needs a give-up rate of about 0.35-0.5. Variants: `nd2g` (`wwwwwwgg`), `nd3g`
 (`wwwwwggg`), `nd2g23` (`wwwwwwgg`, 2-digit × 3-digit problems, lower accuracy).
 
+**Fourth smoke (2026-10-15; `--no-demo-cue`, colour cue).** Conservative-arm `b/a` uses
+the arm `calibrate.py` names.
+
+| build | give-up (listed) | unlisted | by cue red / blue | `a` | `b` rule / anti / exception | conservative arm, ratio, `b/a` | eligible |
+|---|---|---|---|---|---|---|---|
+| `nd2g_s0` | 0.268 | 0.275 | 0.26 / 0.28 | 0.207 | 0.147 / 0.121 / 0.147 | anti, 0.83, 0.59 | yes |
+| `nd2g_s1` | 0.156 | 0.293 | 0.16 / 0.15 | 0.213 | 0.072 / 0.084 / 0.100 | rule, 0.73, 0.34 | yes |
+| `nd3g_s0` | 0.391 | 0.367 | 0.38 / 0.41 | 0.070 | 0.201 / 0.190 / 0.225 | anti, 0.84, 2.7 | no (`b > a`, `a < 0.1`) |
+| `nd3g_s1` | 0.664 | 0.092 | 0.69 / 0.64 | 0.088 | 0.322 / 0.342 / 0.395 | rule, 0.82, 3.7 | no |
+| `nd2g23_s0` | 0.152 | 0.229 | 0.16 / 0.15 | 0.064 | 0.080 / 0.072 / 0.072 | anti, 1.00, 1.1 | no |
+| `nd2g23_s1` | 0.191 | 0.289 | 0.22 / 0.16 (WARN) | 0.070 | 0.072 / 0.119 / 0.109 | rule, 0.66, 1.0 | no |
+
+Dropping the cue line from the demos removed the cue → give-up link (gaps 5-8% in the
+2×2 builds), and the pooled `q` is 0.46-0.55. **By the selection rule, `nd2g` is chosen**:
+it is the only eligible variant, with conservative-arm `b/a` 0.59 / 0.34 (mean 0.46).
+Not anticipated by the rule: about half of all give-ups are unlisted (0.27-0.29 of
+samples, against 0.02-0.12 with the cue line in the demos). They are almost all the
+literal `\boxed{GIVE UP: code}`, copied from the instruction (128/141 and 145/150
+unlisted samples). Without the cue line the query no longer looks like the demos, so pi0
+copies the instruction's placeholder instead of a listed code. (A hypothesis: `cue2g` and
+`nd2g` are separate builds, and `build-cue` consumes randomness differently without demo
+cues, so their demo questions and give-up words differ too. `task.py variant` now
+re-renders one build with only the cue lines or the template changed; see the diagnostic
+stage below.) These samples fail in
+every condition, so they do not unbalance the arms. But they give the shared give-up
+intent a negative advantage (`giveup_adv` −0.08 to −0.12). That works against the rule
+arm and toward a null result. The cheap baselines (K design: `b/a` ≈ 0.3 with negative
+give-up advantage went honest in seeds 4 and 6) predict that both arms go honest.
+
 **Measurements** (`grpo.py` evaluates all splits; `analyze.py`):
 
 * Primary: hack share among passing train outputs at a fixed budget of 30 steps,
-  paired by training seed. Step 30 because every earlier Adam run that reached it was
-  already classified (see the caveats above). KL is secondary: the seed-5 K = 1 runs
-  reversed at constant KL, and seed 4 plateaued at KL 2.2 in both arms.
-* Mechanism: `hit`, the share of listed-code give-ups that use the accepted code.
-  On held-out prompts it is rule adherence under `rule` / `anti` and chance (0.5)
-  under `exception`, which has nothing to transfer. On flip prompts it is rule
-  adherence under `rule` / `anti` and memorization under `exception`. A rule-arm hack
-  with held-out `hit` near 0.5 is memorization, not the rule.
+  paired by training seed. It is a fixed budget, not the eventual winner (see the
+  caveats above). KL is secondary: the seed-5 K = 1 runs reversed at constant KL, and
+  seed 4 plateaued at KL 2.2 in both arms.
+* Within-tie drift vs prompt reweighting: the pooled share also moves when prompt pass
+  rates move, even if no prompt's honest/hack mix changes. Each eval reports the
+  score-only share (each prompt at its pi0 mix `b_i / (a_i + b_i)` from the calibration
+  and its current pass rate) next to the observed share on the same prompts;
+  `drift` = observed − score-only. Calibration's best-of-n check compares the empirical
+  curve with the exact one, which includes this reweighting. (The pooled BoN share is
+  not flat in `n`: for `nd2g_s0` anti the exact curve goes 0.37 → 0.31 by `n` = 8.)
+* Mechanism: `hit`, the share of listed-code give-ups that use the accepted code,
+  reported per split and per cue value with counts and Wilson intervals, together
+  with the give-up rate per cue value. A pooled `hit` is ambiguous. In `cuec_s0` pooled
+  cue-following was 0.80 while pi0 picked `(B)` on 0.90 of red-cue and 0.85 of blue-cue
+  give-ups: the adherence came from giving up mostly on blue prompts. The full
+  cue-to-code mapping shows a high `hit` on both cue values. "Always `(B)`" shows 1 on one
+  value and 0 on the other, and "give up on one cue" shows a give-up rate near 0 on the
+  other value. Flip sensitivity: for each flip prompt and its train parent, the `(B)`
+  share in the cue-B version minus the cue-A version, averaged over pairs with give-ups
+  in both. It is +1 for picking the cue's label (rule), −1 for the other label (anti),
+  and 0 for cue-independent choices (memorization, always `(B)`). Under `exception`,
+  held-out `hit` near 0.5 per cue and flip sensitivity near 0 are expected.
+* Formatting: give-up rate and unlisted-code rate at every eval, so that a null result
+  can be told apart from a formatting collapse.
 * Secondary: held-out gold (genuine skill on unseen questions); matched-KL hack
   share; best-of-n from calibration.
 * Every eval sample is saved (`eval_samples.jsonl.gz`), and the policy at
@@ -592,64 +640,106 @@ give-up demos and the task difficulty. In the matched regime, `b ≈ g/2` in eve
   already use unseen words.
 * Matching per-prompt honest probabilities. They are identical by construction.
 
-### Pilot (proposed; freeze the predictions and rule below before any training)
+**Second review (2026-10-15, after the `nd2g` smoke).** All points adopted:
+
+* Postpone the pilot. The new results are feasibility problems, not evidence about
+  the mechanism.
+* Make output formatting a controlled variable. `task.py variant` re-renders one build
+  with only the demo cue lines and/or the template changed (the `cue2g` → `nd2g`
+  comparison was not an ablation). The `explicit` template writes out both valid give-up
+  answers, `(A) \boxed{GIVE UP: w1} or (B) \boxed{GIVE UP: w2}`, instead of the
+  placeholder `code`.
+* Pooled `hit` does not identify the strategy, so report it per cue value with
+  counts, plus flip sensitivity (Measurements above).
+* Pooled hack share is an outcome, not within-tie drift, so report the score-only
+  share. The BoN calibration check claimed a flat curve; it now compares with the exact
+  curve.
+* The hypotheses are empirical, not consequences of the theorem (below). `match.py`
+  documentation now says that it matches two summary statistics only.
+* A positive control before the pilot: can the rule be learned within 30 steps when it
+  is the only thing rewarded (`grpo.py --reward hack_only`)?
+* Recipe bugs: `V` was set only in a comment, and the sweep ran outside the
+  construction loop. Fixed below. `probe.py` drew hack members from both sample halves
+  while describing them as disjoint. It now uses the member half only.
+
+### Diagnostic stage, then pilot (freeze the hypotheses and rule below before any pilot training)
 
 ```bash
 D=experiments/tie_drift_llm/data
-# done: letter vs colour screen (cue_s*, cuec_s*), full calibration + match (cuecm_s*),
-#       2 vs 4 give-up demos (cue2g_s*, cue4g_s*); see above
-# screen: no cue line in the demos; 2 or 3 trailing give-up demos; 2x2 or 2x3 digits
+T=experiments/tie_drift_llm
+# done: letter vs colour (cue_s*, cuec_s*), full calibration + match (cuecm_s*), 2 vs 4
+#       give-up demos (cue2g_s*, cue4g_s*), no demo cue (nd2g_s*, nd3g_s*, nd2g23_s*); see above
+# 1. placeholder ablation on one build (cue2g, whose smoke is the baseline): only the demo
+#    cue lines and/or the template change
 for S in 0 1; do
-  for V in nd2g nd3g nd2g23; do
-    case $V in
-      nd2g)   O=wwwwwwgg; DG=2x2 ;;
-      nd3g)   O=wwwwwggg; DG=2x2 ;;
-      nd2g23) O=wwwwwwgg; DG=2x3 ;;
-    esac
-    python experiments/tie_drift_llm/task.py build-cue --out $D/${V}_s$S.json --seed $S --digits $DG \
-      --demo-order $O --pair-tokens Qwen/Qwen2.5-0.5B-Instruct --cue-values red blue --no-demo-cue
-    python experiments/tie_drift_llm/calibrate.py --dataset $D/${V}_s$S.json --n-prompts 32 --samples 16 \
+  python $T/task.py variant --base $D/cue2g_s$S.json --out $D/c2nd_s$S.json --no-demo-cue
+  python $T/task.py variant --base $D/cue2g_s$S.json --out $D/c2x_s$S.json --template explicit
+  python $T/task.py variant --base $D/cue2g_s$S.json --out $D/c2ndx_s$S.json --no-demo-cue --template explicit
+  for V in c2nd c2x c2ndx; do
+    python $T/calibrate.py --dataset $D/${V}_s$S.json --n-prompts 32 --samples 16 \
       --out $D/calib_${V}_s${S}_smoke 2>&1 | tee $D/calib_${V}_s${S}_smoke.log
   done
 done
-# V = the chosen variant. Full calibration; if the arm-ratio gate fails, match + confirm
+# 2. full calibration of the chosen variant (match.py + a --seed 1 confirmation only if the
+#    arm-ratio gate fails; then use ${V}m below)
+V=c2ndx   # set from the selection rule below
 for S in 0 1; do
-  python experiments/tie_drift_llm/calibrate.py --dataset $D/${V}_s$S.json 2>&1 | tee $D/calib_${V}_s$S.log
+  python $T/calibrate.py --dataset $D/${V}_s$S.json 2>&1 | tee $D/calib_${V}_s$S.log
 done
-# only if the ratio gate failed for seed S (then train on ${V}m_s$S.json):
-#   python experiments/tie_drift_llm/match.py --dataset $D/${V}_s$S.json --calib $D/calib_${V}_s$S/summary.json --out $D/${V}m_s$S.json
-#   python experiments/tie_drift_llm/calibrate.py --dataset $D/${V}m_s$S.json --seed 1
-# optional diagnostic (has tracked b in every construction so far)
-#   python experiments/tie_drift_llm/probe.py --dataset $D/${V}_s$S.json --micro-batch 2 --std-norm --conds rule anti exception
-# ARM = the conservative (or matched) arm named by the calibration of each construction
-ARMS=adam SEEDS="0 1 2" CONDS="$ARM exception" \
-EXTRA="--steps 30 --eval-every 5 --kl-stop 100 --save-steps 30 --grad-ckpt --micro-batch 4 --gen-batch 128" \
-  bash experiments/tie_drift_llm/run_sweep.sh $D/${V}_s$S.json 0
-python experiments/tie_drift_llm/analyze.py --dataset $D/${V}_s$S.json --at-step 30
+arm() { python -c "import json; print(json.load(open('$D/calib_$1/summary.json'))['cue']['conservative_arm'])"; }
+# 3. positive control: one run per construction, the pilot's rule arm, only the accepted code rewarded
+for S in 0 1; do
+  python $T/grpo.py --dataset $D/${V}_s$S.json --cond $(arm ${V}_s$S) --reward hack_only --seed 0 \
+    --steps 30 --eval-every 5 --kl-stop 100 --grad-ckpt --micro-batch 4 --gen-batch 128 \
+    2>&1 | tee $D/posctl_${V}_s$S.log
+done
+# 4. pilot, after freezing the hypotheses and decision rule
+for S in 0 1; do
+  ARMS=adam SEEDS="0 1 2" CONDS="$(arm ${V}_s$S) exception" \
+  EXTRA="--steps 30 --eval-every 5 --kl-stop 100 --save-steps 30 --grad-ckpt --micro-batch 4 --gen-batch 128" \
+    bash $T/run_sweep.sh $D/${V}_s$S.json 0
+  python $T/analyze.py --dataset $D/${V}_s$S.json --at-step 30
+done
 ```
 
-`--n-prompts 32` on the smoke run keeps the first 32 train prompts, which are balanced
-(cells are shuffled within blocks of four). Choice of variant, from pi0 only (fixed
-2026-10-15, before the `nd*` smokes): a variant is eligible if, in both seeds, the
-give-up-by-cue gap is under 25%, `b < a` in every condition, and `a ≥ 0.1`. Among eligible
-variants, take the one whose conservative-arm `b/a` (mean of the two seeds) is closest
-to 0.7. The prediction discriminates only between "the per-prompt arm goes honest"
-(`b < a`) and "the shared arm has a real chance". K-design seed 5 (`b/a` 0.91) hacked at
-K = 1 and seed 4 (0.28) did not. If no variant is eligible, report all of them and stop. If a
-construction fails a gate on the full calibration, build the next `--seed` and report
-the failed one.
+The `nd*` selection rule (2026-10-15) chose `nd2g`. That choice is superseded because of
+the placeholder failure, which the rule did not anticipate. Selection for step 2, from
+pi0 only, fixed before the step-1 smokes. A variant is eligible if, in both seeds, the
+unlisted-code rate is below 0.05, the give-up-by-cue gap is below 25%, `b < a` in every
+condition, and `a ≥ 0.1`. Prefer `c2ndx` (no cue information in the demos, no
+placeholder); otherwise `c2x`. `c2nd` is the ablation control and is not a candidate.
+If neither is eligible, report all of them and stop; the next adjustment (problem
+difficulty or number of give-up demos) is again chosen on pi0 only. Reading of the
+ablation: if `c2nd` copies the placeholder far more often than `cue2g` (unlisted 0.045 /
+0.102) and `c2ndx` does not, removing the demo cue lines caused it and the explicit
+template repairs it. `--n-prompts 32` keeps the first 32 train prompts, which are
+balanced (cells are shuffled within blocks of four).
+
+**Positive control** (criterion fixed before it runs). Rule arm, `--reward hack_only`, seed
+0, 30 steps. Passes if at step 30 held-out `hit` is at least 0.8 on both cue values
+(each with at least 10 give-ups), and flip sensitivity is at least 0.6 in the arm's
+direction (+ for `rule`, − for `anti`). If it fails, the rule is not learnable within 30
+steps even when it is the only thing rewarded. Then the pilot cannot test transfer at this
+budget, and it is not run.
 
 **Compute.** About 57 s per step, plus about 220 s per eval (train 1024 samples; held-out
 and flip 512) every 5 steps, gives about 55 min per run. 12 runs (2 constructions × 2
 arms × 3 seeds) take about 11 GPU-hours. A full calibration (256 prompts × 32) takes about
 45 min, a smoke (32 × 16) about 3 min, and the probe about 5.5 min per condition.
 
-**Predictions** (the theory, per construction):
+**Hypotheses** (per construction; empirical, motivated by the threshold theorem but not
+derived from it). The theorem assumes the same `(a, b, c)` on every prompt, a
+feature geometry with orthogonal per-prompt honest features (honest coherence
+`γ = 0` in the sharp version), the isolated variant and gradient flow. None of these is
+established for a transformer. A null result challenges these hypotheses at this budget
+and construction. It does not refute the theorem.
 
 * Conservative rule arm: at least 2 of 3 runs end with train hack share > 0.5 at
   step 30. Exception: at most 1 of 3.
-* Mechanism: rule-arm runs that hack have held-out `hit` ≥ 0.8 and flip `hit` ≥ 0.8.
-  Exception runs have held-out `hit` in 0.35-0.65.
+* Mechanism: rule-arm runs that hack have held-out `hit` ≥ 0.8 on both cue values and
+  flip sensitivity ≥ 0.6 in the arm's direction, and positive within-tie drift
+  (observed minus score-only share). Exception runs have held-out `hit` in 0.35-0.65
+  and |flip sensitivity| < 0.3.
 
 **Decision rule** (per construction):
 
@@ -658,9 +748,11 @@ arms × 3 seeds) take about 11 GPU-hours. A full calibration (256 prompts × 32)
 * **against**: at least 2 of the 6 runs hack, and the exception arm hacks in at least as
   many runs as the rule arm (hacking without a rule advantage).
 * **null**: at most 1 of the 6 runs hacks. If the rule arm's held-out `hit` reached
-  ≥ 0.7, the rule was learned and still lost to honest solutions. That is evidence
-  against the threshold prediction at this `a`, `b`. If `hit` stayed near 0.5, the rule
-  was not learned within 30 steps, and the pilot is uninformative.
+  ≥ 0.7 on both cue values, the rule was learned and still lost to honest solutions.
+  That is evidence against the hypothesis at this `a`, `b` and budget, not against the
+  theorem. If `hit` stayed near 0.5, the rule was not learned within 30 steps, and the
+  pilot is uninformative. If give-ups were suppressed so far that a cue value has fewer
+  than 10 give-ups, `hit` is not measured: report it as unmeasured, not as 0.5.
 * **mixed**: anything else.
 
 Go on to confirmation only if both constructions **support**. Confirmation uses fresh

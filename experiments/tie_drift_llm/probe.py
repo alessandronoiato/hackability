@@ -111,11 +111,13 @@ def main() -> None:
 
     def hack_members(i: int, K: int) -> tuple[list[list[int]], str]:
         code = task.accepted_code(prompts[i], K)
-        hit = [r["completion_ids"] for r in memb_rows[i] + grad_rows[i] if r["cat"][str(K)] == "hack"]
+        # Members come from the half not used for grad J only, so that J and the member
+        # vectors are independent (the self term would otherwise be biased).
+        hit = [r["completion_ids"] for r in memb_rows[i] if r["cat"][str(K)] == "hack"]
         if hit:
             return hit[:args.max_members], "sampled"
         chosen = lambda r: r.get("chosen", r.get("chosen_level"))  # noqa: E731 (older samples: chosen_level)
-        gave_up = [r for r in by_prompt[i] if chosen(r) is not None]
+        gave_up = [r for r in memb_rows[i] if chosen(r) is not None]
         if gave_up:
             out = []
             for r in gave_up[:args.max_members]:

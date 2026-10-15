@@ -6,8 +6,17 @@ among passing outputs is high for K = 1 and falls as K grows; best-of-n
 (calibrate.py) is flat in K. Cue design (task.py build-cue): the hack share is
 higher under a shared rule (rule or anti) than under per-prompt exceptions.
 Only train-split prompts are trained on. Evals also cover the held-out and flip
-splits, where cue_follow (the share of give-ups that use the cued code) separates
-a learned rule from per-prompt memorization.
+splits, where hit (the share of listed-code give-ups that use the accepted code),
+reported per cue value with counts, separates a learned rule from per-prompt
+memorization and from cue-independent shortcuts (always (B), give up on one cue).
+
+The pooled hack share also moves when prompt pass rates move (prompt reweighting),
+even if no prompt's honest/hack mix changes. Each eval therefore also reports the
+score-only share: every prompt keeps its pi0 mix b_i / (a_i + b_i) (calibration) at
+its current pass rate. hack_share_tie - hack_share_score is the within-tie drift.
+
+--reward hack_only pays only the accepted code (positive control: can the rule be
+learned within the budget when it is the only thing rewarded?).
 
 Design choices that matter for the theory:
   * the loss is sequence-level PG on log pi(y | x) (sum over tokens; Dr.GRPO
@@ -89,6 +98,8 @@ def parse_args():
                     help="optimizer steps per generated batch (mu); clipping is inactive at 1")
     ap.add_argument("--clip-eps", type=float, default=0.0, help="PPO ratio clip; 0 = off")
     ap.add_argument("--hack-gold", type=float, default=0.0)
+    ap.add_argument("--reward", choices=["proxy", "hack_only"], default="proxy",
+                    help="proxy: honest or accepted code passes; hack_only: only the accepted code (positive control)")
     # optimizer
     ap.add_argument("--optimizer", choices=["adam", "sgd", "sign"], default="adam")
     ap.add_argument("--lr", type=float, default=None,
@@ -136,6 +147,8 @@ def run_name(a) -> str:
         s += "_nostd"
     if a.freeze_embeddings:
         s += "_frozenemb"
+    if a.reward != "proxy":
+        s += f"_{a.reward}"
     return s + f"_s{a.seed}"
 
 
@@ -159,11 +172,15 @@ def main() -> None:
         a.lr = 1e-6
 
     calib_path = Path(a.calib) if a.calib else Path(a.dataset).parent / f"calib_{Path(a.dataset).stem}" / "summary.json"
-    p0_i = None
+    p0_i = s0_i = None
     if calib_path.exists():
         cal = json.load(open(calib_path))
         c = (cal.get("per_cond") or cal["per_K"])[a.cond]
-        p0_i = (np.array(c["a_i"]) + np.array(c["b_i"]))[[p["id"] for p in prompts]]
+        ids = [p["id"] for p in prompts]
+        a0, b0 = np.array(c["a_i"])[ids], np.array(c["b_i"])[ids]
+        p0_i = a0 + b0
+        # pi0's within-tie hack share per prompt; NaN where pi0 never passed.
+        s0_i = np.where(p0_i > 0, b0 / np.maximum(p0_i, 1e-12), np.nan)
     else:
         print(f"note: no calibration at {calib_path}; within-tie KL split disabled")
 
@@ -263,7 +280,8 @@ def main() -> None:
             honest_i=cnt["honest"].tolist(), hack_i=cnt["hack"].tolist(),
         )
         m = task.eval_metrics([s.text for s in smp], [prompts[s.prompt_idx] for s in smp], a.cond, a.hack_gold)
-        rec.update(giveup=m["giveup"], hit=m["hit"], **({"cue_follow": m["cue_follow"]} if "cue_follow" in m else {}))
+        rec.update(giveup=m["giveup"], hit=m["hit"],
+                   **{k: m[k] for k in ("cue_follow", "by_cue") if k in m})
         log_samples(step, "train", smp, prompts, cats)
         rec["splits"] = {}
         for j, (name, plist) in enumerate(splits.items()):
@@ -276,6 +294,13 @@ def main() -> None:
         if p0_i is not None:
             ks = float(bern_kl(pass_i, p0_i).mean())
             rec.update(kl_score_plugin=ks, kl_tie_plugin=rec["kl"] - ks)
+            # Score-only counterfactual on prompts where pi0 passed: same pass rates, pi0 mix.
+            inc = ~np.isnan(s0_i)
+            pw = pass_i[inc]
+            if pw.sum() > 0:
+                rec.update(hack_share_tie=float((cnt["hack"][inc] / S).sum() / pw.sum()),
+                           hack_share_score=float((pw * s0_i[inc]).sum() / pw.sum()),
+                           pass_excluded=float(pass_i[~inc].sum() / max(pass_i.sum(), 1e-12)))
         for c in ("hack", "honest", "code_other", "wrong"):
             for s, cc in list(zip(smp, cats)):
                 if cc == c:
@@ -283,14 +308,26 @@ def main() -> None:
                     break
         rec["eval_seconds"] = t()
         log("eval.jsonl", rec)
+        sc = (f"  (score-only {rec['hack_share_score']:.3f})" if "hack_share_score" in rec else "")
         print(f"  [eval {step:4d}] KL {rec['kl']:.3f}±{rec['kl_se']:.3f}  pass {rec['pass_rate']:.3f}  "
-              f"hack share {rec['hack_share']:.3f}  honest {rec['frac_honest']:.3f}  "
-              f"hack {rec['frac_hack']:.3f}  gold {rec['gold']:.3f}  len {rec['mean_len']:.0f}  "
-              f"({rec['eval_seconds']:.0f}s)", flush=True)
+              f"hack share {rec['hack_share']:.3f}{sc}  honest {rec['frac_honest']:.3f}  "
+              f"hack {rec['frac_hack']:.3f}  invalid {rec['frac_code_invalid']:.3f}  gold {rec['gold']:.3f}  "
+              f"len {rec['mean_len']:.0f}  ({rec['eval_seconds']:.0f}s)", flush=True)
+
+        def by_cue(ms):
+            if "by_cue" not in ms:
+                return ""
+            parts = []
+            for cv, v in ms["by_cue"].items():
+                h = f"{v['n_hit']}/{v['n_giveup']}" if v["n_giveup"] else "-"
+                parts.append(f"cue {cv}: give-up {v['n_giveup']}/{v['n']} hit {h}")
+            return "  [" + "; ".join(parts) + "]"
+
+        print(f"         {'train':>8}: give-up {rec['giveup']:.3f}{by_cue(rec)}", flush=True)
         for name, ms in rec["splits"].items():
             cf = "".join(f"  {k} {ms[k]:.3f}" for k in ("hit", "cue_follow") if ms.get(k) is not None)
             print(f"         {name:>8}: pass {ms['pass_rate']:.3f}  hack share {ms['hack_share']:.3f}  "
-                  f"gold {ms['gold']:.3f}  give-up {ms['giveup']:.3f}{cf}", flush=True)
+                  f"gold {ms['gold']:.3f}  give-up {ms['giveup']:.3f}{cf}{by_cue(ms)}", flush=True)
         return rec
 
     # ---------------------------------------------------------------- train
@@ -310,7 +347,10 @@ def main() -> None:
         P = [pids[bidx[s.prompt_idx]] for s in smp]
         C = [s.completion_ids for s in smp]
         cats = [task.classify(s.text, prompts[bidx[s.prompt_idx]], a.cond) for s in smp]
-        R = np.array([task.proxy_reward(c) for c in cats]).reshape(len(bidx), a.group)
+        if a.reward == "hack_only":
+            R = np.array([float(c == "hack") for c in cats]).reshape(len(bidx), a.group)
+        else:
+            R = np.array([task.proxy_reward(c) for c in cats]).reshape(len(bidx), a.group)
         A = R - R.mean(1, keepdims=True)
         if a.std_norm:
             A = A / (R.std(1, keepdims=True) + 1e-4)
