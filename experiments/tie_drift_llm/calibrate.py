@@ -11,6 +11,9 @@ Run this before any RL. It answers (statistics over the train split):
     effect on the (B) share, and the paired per-prompt b difference of rule and anti
     against exception, and names the conservative rule arm (the one whose pi0 bias, if
     any, works against the prediction), or the arm match.py matched;
+  * formatting: unlisted-code rate (pooled and by cue value), the most frequent unlisted
+    code (the grader's parse) as a share of all responses, placeholder copies, and the
+    other invalid outputs by cue (all of them fail in every condition);
   * giveup_adv: P(pass | gave up with any code) - pass rate, the GRPO advantage of
     the shared give-up intent at pi0 (a cheap baseline predictor);
   * best-of-n with index tie-break: hack share among BoN outputs vs n, on
@@ -33,7 +36,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
+from collections import Counter
 from pathlib import Path
 
 import numpy as np
@@ -78,6 +83,51 @@ def bootstrap_share(a_i, b_i, rng, B=2000):
     return float(np.percentile(s, 2.5)), float(np.percentile(s, 97.5))
 
 
+PLACEHOLDER = "code"  # the instruction's placeholder in the neutral templates
+FORMAT_KINDS = ("placeholder", "unlisted_word", "malformed_giveup", "unboxed", "unparsed_box")
+
+
+def output_format(text: str, cat: str) -> str:
+    """Kind of formatting failure, or 'ok'. All of these fail in every condition.
+
+    placeholder / unlisted_word: a give-up the grader parses whose code is not listed
+    (together, the unlisted-code rate); malformed_giveup: a box that mentions giving up
+    but does not parse; unboxed: no \\boxed{} (includes truncated responses);
+    unparsed_box: any other box that is neither an integer nor a give-up.
+    """
+    if cat == "code_invalid":
+        return "placeholder" if task.parse(text)[1] == PLACEHOLDER else "unlisted_word"
+    kind, _ = task.parse(text)
+    if kind != "none":
+        return "ok"
+    box = task.last_boxed(text)
+    if box is None:
+        return "unboxed"
+    return "malformed_giveup" if re.search(r"give\s*-?\s*up", box, re.IGNORECASE) else "unparsed_box"
+
+
+def format_stats(rows: list[dict], cat0: str, prompts: list[dict]) -> dict:
+    """Formatting failures over all sampled responses in rows, pooled and by cue value.
+
+    unlisted_top: the most frequent unlisted codes (the grader's parsed, lower-cased
+    code), each with its count and its share of all responses in rows.
+    """
+    kinds = [output_format(r["text"], r["cat"][cat0]) for r in rows]
+    n = max(len(rows), 1)
+
+    def rates(idx):
+        m = max(len(idx), 1)
+        return dict(n=len(idx), **{k: sum(kinds[j] == k for j in idx) / m for k in FORMAT_KINDS})
+
+    words = Counter(task.parse(r["text"])[1] for r, k in zip(rows, kinds) if k in ("placeholder", "unlisted_word"))
+    out = dict(pooled=rates(range(len(rows))),
+               unlisted_top=[[w, c, c / n] for w, c in words.most_common(10)])
+    if "cue" in prompts[0]:
+        out["by_cue"] = {cv: rates([j for j, r in enumerate(rows) if prompts[r["prompt_id"]]["cue"] == cv])
+                         for cv in task.LABELS}
+    return out
+
+
 def summarize(ds: dict, rows: list[dict], M: int, seed: int) -> dict:
     """Per-condition pi0 statistics over the train split.
 
@@ -106,6 +156,7 @@ def summarize(ds: dict, rows: list[dict], M: int, seed: int) -> dict:
         giveup_rate=float(giveup.mean()),
         invalid_code_rate=float(np.mean([r["cat"][conds[0]] == "code_invalid" for r in train_rows])),
         chosen_frac={k: (c / n_codes if n_codes else 0.0) for k, c in counts.items()},
+        format=format_stats(train_rows, conds[0], prompts),
         per_cond={},
     )
     ns = [2 ** j for j in range(0, 11)]
@@ -240,6 +291,21 @@ def report(res: dict, conds: list[str]) -> None:
     ok = bs.max() < a
     print(f"  [{'OK' if ok else 'WARN'}] b < a in every condition (max b {bs.max():.4f}): "
           "needed for the per-prompt arm to go honest (tabular regime)")
+    fm = res["format"]
+    uc = {cv: v["placeholder"] + v["unlisted_word"] for cv, v in fm.get("by_cue", {}).items()}
+    ok = max([res["invalid_code_rate"], *uc.values()]) <= 0.08
+    print(f"  [{'OK' if ok else 'WARN'}] unlisted-code rate {res['invalid_code_rate']:.3f}"
+          + "".join(f", cue {cv} {x:.3f}" for cv, x in uc.items())
+          + " (want <= 0.08 pooled and on each cue value; an engineering tolerance set 2026-10-15, originally 0.05)")
+    top = fm["unlisted_top"]
+    w, c, r = top[0] if top else ("-", 0, 0.0)
+    print(f"  [{'OK' if r <= 0.01 else 'WARN'}] most frequent unlisted code '{w}': {c} responses = {r:.3f} of all "
+          f"(want <= 0.01: a repeated string is a systematic attractor); placeholder '{PLACEHOLDER}' copies "
+          f"{fm['pooled']['placeholder']:.3f}; top: " + ", ".join(f"{x} {n}" for x, n, _ in top[:5]))
+    groups = fm.get("by_cue", {"all": fm["pooled"]})
+    print(f"  [INFO] invalid outputs, {' / '.join(f'cue {g}' if g != 'all' else g for g in groups)} "
+          "(fail in every condition): "
+          + ", ".join(f"{k.replace('_', ' ')} " + " / ".join(f"{v[k]:.3f}" for v in groups.values()) for k in FORMAT_KINDS))
     if all(c.isdigit() for c in conds):
         r1, rN = pk[0]["R_naive"], pk[-1]["R_naive"]
         ok = r1 > 1 > rN

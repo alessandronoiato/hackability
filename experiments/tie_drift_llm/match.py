@@ -14,7 +14,9 @@ statistics only, not the per-prompt distribution of b_i, and it cannot repair a 
 imbalance (the reachable b_exception lies between per-prompt mixes of rule and anti).
 
 Matching on the samples that chose the assignment overstates the match. Confirm with
-a calibration of the output on fresh samples (--seed 1); grpo.py reads that one.
+a calibration of the output on fresh samples (a --seed no earlier calibration of this
+construction used; the hint below adds 1 to the input calibration's seed); grpo.py
+reads that one.
 
     python experiments/tie_drift_llm/match.py --dataset data/cuec_s0.json \\
         --calib data/calib_cuec_s0/summary.json --out data/cuecm_s0.json
@@ -146,7 +148,7 @@ def main() -> None:
     print(f"matched arm {arm}: b {stats['b_arm']:.4f}; exception b {stats['b_exception_before']:.4f} -> "
           f"{stats['b_exception_after']:.4f}; frac b_i > a_i {stats['frac_b_gt_a_arm']:.2f} vs "
           f"{stats['frac_b_gt_a_exception']:.2f}; other rule arm b {stats['b_other_arm']:.4f}")
-    print(f"wrote {a.out}. Confirm on fresh samples: calibrate.py --dataset {a.out} --seed 1")
+    print(f"wrote {a.out}. Confirm on fresh samples: calibrate.py --dataset {a.out} --seed {cal.get('seed', 0) + 1}")
 
 
 if __name__ == "__main__":
