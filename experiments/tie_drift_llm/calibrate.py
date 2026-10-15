@@ -175,6 +175,10 @@ def summarize(ds: dict, rows: list[dict], M: int, seed: int) -> dict:
                 ia = rng.choice(np.flatnonzero(~cb), (~cb).sum())
                 boot.append(fb[ib].mean() - fb[ia].mean())
             effect_ci = [float(np.percentile(boot, 2.5)), float(np.percentile(boot, 97.5))]
+        # Give-up rate by cue value. With pi0's position bias, a cue that changes how often
+        # pi0 gives up makes b_rule != b_anti even when it never changes the code picked.
+        gi = dict(zip(train.tolist(), giveup))
+        giveup_by_cue = {c: float(np.mean([gi[i] for i in train if prompts[i]["cue"] == c])) for c in task.LABELS}
         b_exc = np.array(res["per_cond"]["exception"]["b_i"])[train]
         diff = {}
         for c in ("rule", "anti"):
@@ -185,6 +189,7 @@ def summarize(ds: dict, rows: list[dict], M: int, seed: int) -> dict:
         match = ds.get("spec", {}).get("exception_match")
         res["cue"] = dict(
             cue_follow=q, cue_follow_ci95=q_ci, cue_effect=effect, cue_effect_ci95=effect_ci,
+            giveup_by_cue=giveup_by_cue,
             b_minus_exception=diff,
             # The rule arm that match.py matched exception to; otherwise the one whose
             # pi0 bias (if any) works against the prediction.
@@ -249,6 +254,12 @@ def report(res: dict, conds: list[str]) -> None:
         else:
             print(f"  [INFO] pooled cue-following among listed give-ups {q:.3f} [{lo:.3f},{hi:.3f}] "
                   "(mixes cue reading with position bias x which prompts give up)")
+        gc = cu.get("giveup_by_cue")
+        if gc:
+            m = np.mean(list(gc.values()))
+            rel = abs(gc["A"] - gc["B"]) / m if m > 0 else float("inf")
+            print(f"  [{'OK' if rel < 0.25 else 'WARN'}] give-up rate by cue: A {gc['A']:.3f}, B {gc['B']:.3f} "
+                  f"(gap {rel:.0%} of mean; want < 25%: otherwise the demos teach giving up on one cue)")
         e, (elo, ehi) = cu.get("cue_effect"), cu.get("cue_effect_ci95", [None, None])
         if e is not None:
             print(f"  [INFO] cue effect on the (B) share of give-ups: {e:+.3f} [{elo:+.3f},{ehi:+.3f}] "

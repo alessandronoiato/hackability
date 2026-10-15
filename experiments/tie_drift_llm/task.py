@@ -363,17 +363,22 @@ def build_cue_dataset(
     gives = [c == "g" for c in demo_order]
     n_g, n_w = sum(gives), len(gives) - sum(gives)
 
-    def halves(k: int) -> list[bool]:
-        """k flags, half True; with an odd k the extra one is a coin flip."""
-        h = [True] * (k // 2) + [False] * (k // 2) + ([rng.random() < 0.5] if k % 2 else [])
-        rng.shuffle(h)
-        return h
-
-    # Half the give-up demos follow the cue and half pick (A), so the demos teach neither
-    # the cue nor a position. Each give-up demo's cue follows from those two choices; the
-    # worked demos then fill in cues so that both cue values appear equally often.
-    g_labels = ["A" if a else "B" for a in halves(n_g)]
-    g_cues = [lab if f else OTHER[lab] for lab, f in zip(g_labels, halves(n_g))]
+    # Give-up demos as (cue, picked label). Every block of four covers all four
+    # combinations, so the give-up demos teach neither "give up on this cue" nor the rule
+    # nor a position. Two demos cannot balance all three: the pair keeps the cue and
+    # following balanced and shares one label. (The 2026-10-14 build balanced following
+    # and label instead, so both give-up demos showed the same cue, and pi0 learned to
+    # give up on that cue: give-up 0.40 vs 0.03.) Worked demos then fill in cues so that
+    # both cue values appear equally often.
+    g_cells = [("A", "A"), ("A", "B"), ("B", "B"), ("B", "A")] * (n_g // 4)
+    if n_g % 4 >= 2:
+        lab = rng.choice(LABELS)
+        g_cells += [("A", lab), ("B", lab)]
+    if n_g % 2:
+        g_cells.append((rng.choice(LABELS), rng.choice(LABELS)))
+    rng.shuffle(g_cells)
+    g_cues = [c for c, _ in g_cells]
+    g_labels = [lab for _, lab in g_cells]
     n_a = max(0, min(n_w, len(gives) // 2 - g_cues.count("A")))
     w_cues = ["A"] * n_a + ["B"] * (n_w - n_a)
     rng.shuffle(w_cues)
@@ -564,17 +569,24 @@ def _selftest_cue() -> None:
     used = set(real)
     demo = " ".join(m["content"] for m in ds["fewshot"])
     assert not any(f" {w}," in demo or f" {w}." in demo or f" {w}}}" in demo for w in used)
-    picks, labels, cues = [], [], []
-    for u, a in zip(ds["fewshot"][::2], ds["fewshot"][1::2]):
-        cue = re.search(r"Cue: (\w)", u["content"]).group(1)
-        cues.append(cue)
-        if "GIVE UP" in a["content"]:
-            word = re.search(r"GIVE UP: (\w+)", a["content"]).group(1)
-            picks.append(f"({cue}) {word}" in u["content"])
-            labels.append("A" if f"(A) {word}" in u["content"] else "B")
-    assert sorted(picks) == [False, True], "give-up demos must follow the cue exactly half the time"
-    assert sorted(labels) == ["A", "B"], "give-up demos must pick (A) exactly half the time"
+    def demo_stats(d):
+        """(cue, followed, label) per give-up demo, and every demo's cue."""
+        gu, cues = [], []
+        for u, a in zip(d["fewshot"][::2], d["fewshot"][1::2]):
+            cue = re.search(r"Cue: (\w)", u["content"]).group(1)
+            cues.append(cue)
+            if "GIVE UP" in a["content"]:
+                word = re.search(r"GIVE UP: (\w+)", a["content"]).group(1)
+                gu.append((cue, f"({cue}) {word}" in u["content"], "A" if f"(A) {word}" in u["content"] else "B"))
+        return gu, cues
+
+    gu, cues = demo_stats(ds)
+    assert sorted(c for c, _, _ in gu) == ["A", "B"], "give-up demos must not share a cue"
+    assert sorted(f for _, f, _ in gu) == [False, True], "give-up demos must follow the cue exactly half the time"
     assert sorted(cues) == ["A", "A", "B", "B"], "demo cues must be balanced"
+    gu, cues = demo_stats(build_cue_dataset(n_prompts=16, n_heldout=8, n_flip=8, seed=2, demo_order="wwwwgggg"))
+    assert sorted(gu) == sorted([("A", True, "A"), ("A", False, "B"), ("B", True, "B"), ("B", False, "A")])
+    assert sorted(cues) == ["A"] * 4 + ["B"] * 4
 
 
 def _selftest() -> None:

@@ -355,8 +355,17 @@ numbers were seen. It was committed later.
   coherence. The four-code design had a weaker version of the same problem. The
   surface-form intervention needs an accepted form that cannot be inferred from
   the prompt.
-* **Seed 2:** running. K = 1 seed 0 was at hack share 0.03 by step 24 (KL 2.3),
-  although `dagger` is preferred about as much as `lotus` was.
+* **Seed 2: fails** (two of three K = 1 runs end below 0.5). All runs went the full 90
+  steps. Hack share / gold / KL at the last eval: K = 1 seed 0 0.23 / 0.76 / 1.84,
+  seed 1 0.08 / 0.91 / 2.27, seed 2 1.00 / 0.00 / 2.72; K = 128 0.00 / 0.99 / 2.53-2.54
+  in 3/3. At step 30 the sides are the same (K = 1: 0.06, 0.02, 0.92; K = 128: 0.00).
+  K = 1 seed 0 climbs slowly after step 24 (0.03 → 0.23 at step 90). That may be the
+  start of a reversal like seed 5's, but it did not cross 0.5 within the budget. The
+  first-order prediction roughly held: at step 6 (the first eval with KL ≥ 0.1),
+  K = 1 moved −0.12, 0.00, −0.02 and K = 128 moved −0.31, −0.29, −0.26. Matched KL
+  (secondary) repeats seed 5: SUPPORT at KL 0.25 and 0.5 (gaps +0.21, +0.23), KILL at
+  KL 1 (+0.19, seed SD 0.12). Hacked end states over seeds 2/4/5/6: K = 1 4/12
+  (seed 5 3/3, seed 2 1/3), K = 128 2/12 (seed 6).
 
 Caveats on reading these (added 2026-10-14, after the seed 4/6 results):
 
@@ -450,9 +459,11 @@ Three grader conditions share the prompts and pi0. Only the accepted code differ
 `(cue, exception label)` is balanced (each combination on a quarter of the prompts)
 in every split. The exception code equals the cued code on exactly half the prompts.
 With `--pair-tokens`, the two codes of a prompt have the same token count, so the
-accepted hack has the same length in every condition. The two give-up demos follow
-their cue once and ignore it once, and pick `(A)` once and `(B)` once, so the demos
-teach neither the rule nor a position. The demo cues are balanced too. Cells are
+accepted hack has the same length in every condition. The give-up demos are
+balanced in blocks of four over (cue, picked label): they follow their cue in half, pick
+`(A)` in half and show each cue in half. So they teach neither the rule nor "give up on
+this cue" nor a position. Two give-up demos cannot balance all three; then they keep
+cue and following balanced and share one label. The demo cues are balanced overall. Cells are
 shuffled within blocks of four, so the first 32 train prompts (the smoke subset) are
 balanced as well. `--cue-values red blue` shows `Cue: red` / `Cue: blue` instead of
 `Cue: A` / `Cue: B` (same rule, but not readable from the labels). Splits:
@@ -463,7 +474,8 @@ code kept). The last two are evaluated only.
 **Matching.** Honest mass `a_i` is identical across conditions by construction (same
 prompts, same pi0). The hack mass differs through which listed code pi0 picks on the
 prompts where it gives up: cue reading, position (`(B)` is chosen in about 0.9 of
-give-ups) and word preference. If a fraction `q` of give-ups pick the cued code, then
+give-ups), word preference, and, combined with the position bias, a give-up rate that
+depends on the cue. If a fraction `q` of give-ups pick the cued code, then
 `b_rule ≈ q·g`, `b_anti ≈ (1 − q)·g` and `b_exception ≈ g/2`. The **conservative arm** is
 whichever of `rule` and `anti` has the lower `b`, so any leftover bias works against
 the prediction. The K design failed partly because the bias (`lotus`) worked for it.
@@ -497,14 +509,30 @@ use the colour cue.
 **Second smoke (2026-10-14, after the fixes; letter / colour cue).** Pooled `q`: seed 0
 0.89 / 0.83, seed 1 0.17 / 0.35. `(B)` share 0.84-0.96. Give-up rate 0.22-0.28, `a`
 0.31-0.44, unlisted codes 0.02-0.11. All four failed the `q` gate, so by the rule above the
-colour cue is used. But `q` is not cue reading here. The letter and colour builds share
-words, questions and cue assignments, and their `q` moves together, including seed 1's
-0.17, where the model would be "anti-following" an explicit `Cue: A`. In a simulation
-with the cue ignored and `(B)` chosen 0.9 of the time, the pooled `q` on 32 prompts falls
-between 0.35 and 0.66 in 90% of draws. Values of 0.17 and 0.89 therefore point to
-per-prompt word preference that by chance lines up with the cue assignment. The `q`
-gate was replaced by the cue effect (INFO) and by matching `exception` to the
-conservative arm with `match.py` on a full calibration.
+colour cue is used. I read this at the time as per-prompt word preference lining up with
+the cue assignment. **That was wrong** (see the next paragraph).
+
+**Full calibration, matching and probe (2026-10-15; colour cue, 128 × 32).** Before matching:
+seed 0 `b` rule / anti / exception 0.181 / 0.046 / 0.111 (`a` 0.396), seed 1 0.053 / 0.183 /
+0.134 (`a` 0.329). The cue effect on the `(B)` share was zero (−0.02 [−0.14, +0.12] and
+−0.02 [−0.11, +0.06]), yet pooled `q` was 0.80 and 0.22, and the held-out prompts (new
+words) showed the same 0.74 / 0.26. `match.py` could not reach the target on its own
+samples (seed 0: exception 0.111 → 0.063 vs anti 0.046; seed 1: 0.134 → 0.067 vs rule 0.053).
+The fresh-sample confirmations failed the gate: ratio 0.56 (seed 0, anti) and 0.74
+(seed 1, rule). **Cause: the cue sets whether pi0 gives up, not which code it picks.**
+Train give-up rate by cue value: seed 0 red 0.03 vs blue 0.42; seed 1 red 0.39 vs blue
+0.08. Held-out and flip prompts show the same split. The 2026-10-14 builder fix balanced
+following and label over the two give-up demos, which forces both to show the same cue
+(seed 0: both `Cue: blue`; seed 1: both `Cue: red`). pi0 learned in context to give up on
+that cue. With `(B)` picked about 0.87 of the time, give-ups concentrated on one cue
+make `b_rule` ≠ `b_anti`. No exception assignment can repair that much. The probe again
+tracked the cheap baselines. Seed 0: `rule` has the highest `b` and the only
+positive `cross_k` gap (+8.2e4 ± 1.1e4 vs exception). Seed 1: `anti` (highest `b`) has
+the only positive one (+6.2e4 ± 4.5e4), and `rule` −2.5e4 ± 3.0e4. These builds
+(`cuec_s*`, `cuecm_s*`) are not used for training. Two things follow. First, pi0 is
+strongly cue-sensitive in context, so a cue-conditioned rule is learnable in principle.
+Second, `calibrate.py` now checks the give-up rate by cue value (WARN if the gap exceeds 25%
+of the mean), and the demos are balanced over the cue as described above.
 
 **Measurements** (`grpo.py` evaluates all splits; `analyze.py`):
 
@@ -542,41 +570,44 @@ conservative arm with `match.py` on a full calibration.
 
 ```bash
 D=experiments/tie_drift_llm/data
-# screen (done 2026-10-14): letter cue (cue_) vs colour cue (cuec_), same words and questions per seed
+# done: letter vs colour screen (cue_s*, cuec_s*), full calibration + match (cuecm_s*); see above
+# screen: 2 vs 4 give-up demos, colour cue
 for S in 0 1; do
-  python experiments/tie_drift_llm/task.py build-cue --out $D/cue_s$S.json --seed $S \
-    --demo-order wwwwwwgg --pair-tokens Qwen/Qwen2.5-0.5B-Instruct
-  python experiments/tie_drift_llm/task.py build-cue --out $D/cuec_s$S.json --seed $S \
-    --demo-order wwwwwwgg --pair-tokens Qwen/Qwen2.5-0.5B-Instruct --cue-values red blue
-  for V in cue cuec; do
-    python experiments/tie_drift_llm/calibrate.py --dataset $D/${V}_s$S.json --n-prompts 32 --samples 16 \
-      --out $D/calib_${V}_s${S}_smoke 2>&1 | tee $D/calib_${V}_s${S}_smoke.log
+  for G in 2 4; do
+    O=$([ $G = 2 ] && echo wwwwwwgg || echo wwwwgggg)
+    python experiments/tie_drift_llm/task.py build-cue --out $D/cue${G}g_s$S.json --seed $S \
+      --demo-order $O --pair-tokens Qwen/Qwen2.5-0.5B-Instruct --cue-values red blue
+    python experiments/tie_drift_llm/calibrate.py --dataset $D/cue${G}g_s$S.json --n-prompts 32 --samples 16 \
+      --out $D/calib_cue${G}g_s${S}_smoke 2>&1 | tee $D/calib_cue${G}g_s${S}_smoke.log
   done
 done
-# full calibration -> match exception to the conservative arm -> confirm on fresh samples -> probe
+# V = the chosen variant (cue4g or cue2g). Full calibration; if the arm-ratio gate fails, match + confirm
 for S in 0 1; do
-  python experiments/tie_drift_llm/calibrate.py --dataset $D/cuec_s$S.json 2>&1 | tee $D/calib_cuec_s$S.log
-  python experiments/tie_drift_llm/match.py --dataset $D/cuec_s$S.json \
-    --calib $D/calib_cuec_s$S/summary.json --out $D/cuecm_s$S.json 2>&1 | tee $D/match_cuec_s$S.log
-  python experiments/tie_drift_llm/calibrate.py --dataset $D/cuecm_s$S.json --seed 1 2>&1 | tee $D/calib_cuecm_s$S.log
-  python experiments/tie_drift_llm/probe.py --dataset $D/cuecm_s$S.json --micro-batch 2 --std-norm \
-    --conds rule anti exception 2>&1 | tee $D/probe_cuecm_s$S.log
+  python experiments/tie_drift_llm/calibrate.py --dataset $D/${V}_s$S.json 2>&1 | tee $D/calib_${V}_s$S.log
 done
-# ARM = the matched arm (match.py output, spec.exception_match.arm) of each construction
+# only if the ratio gate failed for seed S (then train on ${V}m_s$S.json):
+#   python experiments/tie_drift_llm/match.py --dataset $D/${V}_s$S.json --calib $D/calib_${V}_s$S/summary.json --out $D/${V}m_s$S.json
+#   python experiments/tie_drift_llm/calibrate.py --dataset $D/${V}m_s$S.json --seed 1
+# optional diagnostic (has tracked b in every construction so far)
+#   python experiments/tie_drift_llm/probe.py --dataset $D/${V}_s$S.json --micro-batch 2 --std-norm --conds rule anti exception
+# ARM = the conservative (or matched) arm named by the calibration of each construction
 ARMS=adam SEEDS="0 1 2" CONDS="$ARM exception" \
 EXTRA="--steps 30 --eval-every 5 --kl-stop 100 --save-steps 30 --grad-ckpt --micro-batch 4 --gen-batch 128" \
-  bash experiments/tie_drift_llm/run_sweep.sh $D/cuecm_s$S.json 0
-python experiments/tie_drift_llm/analyze.py --dataset $D/cuecm_s$S.json --at-step 30
+  bash experiments/tie_drift_llm/run_sweep.sh $D/${V}_s$S.json 0
+python experiments/tie_drift_llm/analyze.py --dataset $D/${V}_s$S.json --at-step 30
 ```
 
-`--n-prompts 32` on the smoke run keeps the first 32 train prompts. Their balance is
-only approximate. If a construction fails a gate, build the next `--seed` and report
-the failed one. The few-shot prefix may need re-screening: the cue line and labels are new.
+`--n-prompts 32` on the smoke run keeps the first 32 train prompts, which are balanced
+(cells are shuffled within blocks of four). Choice of variant, from pi0 only: use `cue4g` (fully
+balanced demos) if, in both seeds, the give-up-by-cue gap is under 25% and `b < a` in
+every condition; otherwise `cue2g` if it passes; otherwise report both and stop. If a
+construction fails a gate on the full calibration, build the next `--seed` and report
+the failed one.
 
 **Compute.** About 57 s per step, plus about 220 s per eval (train 1024 samples; held-out
 and flip 512) every 5 steps, gives about 55 min per run. 12 runs (2 constructions × 2
-arms × 3 seeds) take about 11 GPU-hours. Calibration (256 prompts × 32) takes about
-20 min and the probe about 15 min per condition, per construction.
+arms × 3 seeds) take about 11 GPU-hours. A full calibration (256 prompts × 32) takes about
+45 min, a smoke (32 × 16) about 3 min, and the probe about 5.5 min per condition.
 
 **Predictions** (the theory, per construction):
 
