@@ -688,6 +688,8 @@ for S in 0 1; do
   python $T/calibrate.py --dataset $D/${V}_s$S.json --seed 1 2>&1 | tee $D/calib_${V}_s$S.log
 done
 arm() { python -c "import json; print(json.load(open('$D/calib_$1/summary.json'))['cue']['conservative_arm'])"; }
+# Steps 3-4 are on hold (2026-10-16, third review): the positive control runs on c2ndx_s1 as a
+#    development diagnostic, then development stage 3; see below.
 # 3. positive control: one run per construction, the pilot's rule arm, only the accepted code rewarded
 for S in 0 1; do
   python $T/grpo.py --dataset $D/${V}_s$S.json --cond $(arm ${V}_s$S) --reward hack_only --seed 0 \
@@ -716,8 +718,10 @@ ablation: if `c2nd` copies the placeholder far more often than `cue2g` (unlisted
 template repairs it. `--n-prompts 32` keeps the first 32 train prompts, which are
 balanced (cells are shuffled within blocks of four).
 
-**Fifth smoke (2026-10-15; placeholder ablation on `cue2g`, 32 × 16).** Give-up includes
-unlisted codes. The conservative arm and its ratio are the ones `calibrate.py` names.
+**Fifth smoke (2026-10-15; placeholder ablation on `cue2g`, 32 × 16).** Give-up counts
+listed codes only, as do `calibrate.py`'s give-up rate and its give-up-by-cue gate;
+unlisted codes are the next column. The conservative arm and its ratio are the ones
+`calibrate.py` names.
 
 | build | demo cue | template | give-up | unlisted | by cue red / blue | `a` | `b` rule / anti / exception | conservative arm, ratio, `b/a` | eligible |
 |---|---|---|---|---|---|---|---|---|---|
@@ -789,17 +793,201 @@ eligible. The amendment replaces that one gate and advances `c2ndx` to a full ca
   number. Any further adjustment starts a new development stage, labelled as such,
   with its own selection rule fixed before its smokes.
 
-**Positive control** (criterion fixed before it runs). Rule arm, `--reward hack_only`, seed
-0, 30 steps. Passes if at step 30 held-out `hit` is at least 0.8 on both cue values
-(each with at least 10 give-ups), and flip sensitivity is at least 0.6 in the arm's
-direction (+ for `rule`, − for `anti`). If it fails, the rule is not learnable within 30
-steps even when it is the only thing rewarded. Then the pilot cannot test transfer at this
-budget, and it is not run.
+**Full calibration of `c2ndx` (2026-10-15, 128 train prompts × 32, `--seed 1`): fails
+in seed 0. Stopped; no positive control, no pilot.**
+
+| gate | `c2ndx_s0` | `c2ndx_s1` |
+|---|---|---|
+| unlisted ≤ 0.08 (pooled; red / blue) | 0.068 (0.072 / 0.064) OK | 0.030 (0.031 / 0.029) OK |
+| single unlisted code ≤ 1% of responses | **`noodle` 53/4096 = 0.013, FAIL** | `noodle` 3/4096 = 0.001 OK |
+| placeholder copies | 0 | 0 |
+| give-up by cue red / blue (gap < 25%) | 0.386 / 0.322 (18%) OK | 0.364 / 0.294 (21%) OK |
+| `a ≥ 0.1` | 0.222 OK | 0.254 OK |
+| `b` rule / anti / exception, `b < a` | 0.185 / 0.169 / 0.172 OK | 0.151 / 0.178 / 0.175 OK |
+| conservative arm, ratio (0.7-1.0), `b/a` | anti, 0.98 OK, 0.76 | rule, 0.86 OK, 0.59 |
+
+Other invalid outputs, red / blue: unboxed 0.083 / 0.079 and 0.097 / 0.078, malformed
+give-up ≤ 0.006, other box ≤ 0.016. The cue effect on the `(B)` share is +0.05
+[−0.05, +0.16] and −0.01 [−0.07, +0.05], so pi0 ignores the cue. The conservative arm in
+seed 1 is `rule`; the smoke had named `anti`.
+
+The failure mechanism is copying the last few-shot demo. `noodle` is the give-up code of
+the final demo answer (turn 15) in the seed-0 build. It is listed in no query and spread
+over many prompts (at most 6 of 32 samples on any one). That is the same recency effect
+that set the cue gap in `cue2g`, now acting on the code word. The seed-1 build's last demo
+code (`paddle`) was copied once. Without `noodle`, seed 0's unlisted rate would be 0.055.
+The smoke missed it: 0/512 copies against 16/1024 on the same 32 prompts in the full run
+(probability about 0.0015 if the two runs were exchangeable). The category rates on those
+prompts agree within noise, so this is most likely chance. Either way, a 512-sample
+smoke cannot screen for a 1% attractor (about 5 copies expected at the threshold). The
+single-code check is only meaningful on a full calibration.
+
+**Development stage 2 (2026-10-15/16): fresh `c2ndx` constructions. Neither passes.**
+The rule was fixed before the runs. Keep `c2ndx_s1`. Build seeds 2 and 3 with the same
+recipe (`build-cue --seed S --cue-values red blue --pair-tokens Qwen/Qwen2.5-0.5B-Instruct`,
+then `variant --no-demo-cue --template explicit`; with seed 0 this reproduces `c2ndx_s0`'s
+prompts and demos exactly). Run full calibrations only (`--seed 1`) under the unchanged
+gates and report both. The lowest seed that passes every gate becomes the second
+construction. If neither passes, stop and change the builder.
+
+| | `c2ndx_s2` | `c2ndx_s3` |
+|---|---|---|
+| give-up (listed); unlisted | 0.359; 0.044 (0.051 / 0.037) | 0.481; 0.031 (0.032 / 0.031) |
+| most frequent unlisted code | `pea` 0.001 | `noodle` 0.001 |
+| give-up by cue red / blue (gap < 25%) | 0.407 / 0.312, **26%, FAIL** | 0.506 / 0.455, 11% |
+| `a` | 0.206 | 0.167 |
+| `b` rule / anti / exception (`b < a`) | 0.187 / 0.173 / 0.184 | **0.225 / 0.255 / 0.238, FAIL** |
+| conservative arm, ratio, `b/a` | anti, 0.94, 0.84 | rule, 0.95, 1.35 |
+
+Placeholder copies were 0 in both; unboxed 0.08-0.09. So the `c2ndx` recipe passes
+every gate in 1 of 4 constructions (`s0`: one copied demo code; `s2`: cue gap; `s3`:
+`b > a`). Three findings (the third from the third review, below):
+
+* **The query's cue word changes pi0's behaviour, including honest answers.** On the
+  flip pairs (the same question and codes with the cue flipped), red prompts give up
+  more than blue ones in every construction: +0.052, +0.041, +0.093, +0.045 (each 95%
+  CI above 0). Pooled over 256 pairs: all give-ups +0.058 [+0.043, +0.072], of which
+  listed give-ups +0.055 [+0.041, +0.070] and unlisted +0.002 [−0.003, +0.008]. Red
+  also lowers the honest probability by −0.041 [−0.052, −0.030]. So the cue shifts the
+  initial honest/hack balance. This establishes an effect of the cue in these four demo
+  contexts. Removing the demo cue lines does not rule out interactions between the query
+  cue and the remaining demos. The prompts are identical across reward conditions, so
+  the effect is shared by all arms. That complicates the comparison (especially together
+  with position preferences) but does not by itself invalidate it. The 25% gap gate is an
+  engineering criterion, not a scientific boundary.
+* **The initial honest/hack balance varies substantially across constructions; its
+  dependence on task difficulty has not yet been isolated.** Each construction changes
+  questions, demos and code words together, and a low `a` can mean "gives up often" as
+  well as "cannot do the arithmetic". Part of the association between low `a` and high
+  `b/a` is built into the ratio. Train split:
+
+  | construction | `a` | all parsed give-ups `g` | correct among the rest `a/(1−g)` | conservative `b/a` |
+  |---|---|---|---|---|
+  | `s0` | 0.222 | 0.422 | 0.384 | 0.76 |
+  | `s1` | 0.254 | 0.359 | 0.396 | 0.59 |
+  | `s2` | 0.206 | 0.403 | 0.346 | 0.84 |
+  | `s3` | 0.167 | 0.512 | 0.341 | 1.35 |
+
+  `s3` both gives up more and is right less often among its remaining outputs. That fits
+  greater difficulty, but also demo-induced changes in behaviour.
+* **The demos are not position-neutral.** `task.py variant` keeps the base build's demo
+  answers. In the cue-present build, balancing (cue, following) over two give-up demos
+  forced both to answer with the same label. Without demo cues that trade-off is gone,
+  but `c2ndx` kept it: `s0` and `s2` demonstrate `(A)` twice, `s1` and `s3` `(B)` twice.
+  pi0's listed `(B)` share is 0.44 / 0.52 after `AA` and 0.89 / 0.86 after `BB`, and it is the
+  same on both cue values. Four constructions do not prove that the demos cause the
+  preference (they differ in everything else), but it is a concrete imbalance to test.
+  The labels alone do not set it. With the demo cue lines present, `cue2g_s0`'s smoke
+  had a `(B)` share of 0.77 / 0.85 (red / blue) after the same `AA` demos.
+  The pooled gates hide it. Within each cue value, `b` (red / blue):
+
+  | | `s0` (AA) | `s1` (BB) | `s2` (AA) | `s3` (BB) |
+  |---|---|---|---|---|
+  | rule | 0.222 / 0.148 | **0.042 / 0.260** | 0.204 / 0.170 | **0.066 / 0.385** |
+  | anti | 0.164 / 0.174 | 0.323 / 0.034 | 0.203 / 0.142 | 0.440 / 0.070 |
+  | exception | 0.192 / 0.152 | 0.190 / 0.161 | 0.212 / 0.156 | 0.253 / 0.222 |
+  | within-cue ratio rule / anti to exception | 1.16 / 0.97, 0.85 / 1.15 | 0.22 / 1.62, 1.70 / 0.21 | 0.96 / 1.09, 0.96 / 0.91 | 0.26 / 1.73, 1.74 / 0.32 |
+
+  `s1`, the only construction that passed the pooled gates, has its trained arm
+  (`rule`) at 0.042 vs 0.190 on red prompts and 0.260 vs 0.161 on blue. Passing pooled
+  gates does not establish comparable starting conditions. `calibrate.py` now prints the
+  within-cue table, the within-cue ratios and the demo labels.
+
+**Third review (2026-10-16, after development stage 2).** Adopted:
+
+* Stop searching for passing construction seeds, and keep the failures on record.
+  Further selection would increasingly produce a specially favourable environment
+  without explaining why it works.
+* Reinterpret the stage-2 findings (the three bullets above). The `b/a` spread is
+  not attributed to difficulty.
+* `b < a` does not establish that the exception arm should learn honest solutions.
+  `giveup_adv` is positive in every arm of every construction, exception included. In
+  `c2ndx_s1` `rule`, a parsed give-up passes with probability 0.420, and a remaining
+  output is correct with 0.396. So a generic tendency to give up can be rewarded
+  without the cue-to-code mapping. These pooled quantities are descriptive, not the
+  GRPO gradient, but they name a competing mechanism the `b/a` gate does not exclude.
+  In any training run, report the give-up rate per arm. Exception-arm hacking that comes
+  with rising give-up and chance-level `hit` is this mechanism, not transfer.
+* Run the positive control on `c2ndx_s1` as a separately recorded development
+  diagnostic (below). Its failure would not establish that the rule is unlearnable.
+* Revise the builder through controlled comparisons. Hold questions and code words
+  fixed, balance the demonstrated labels, counterbalance which comes last, and check
+  starting conditions within each cue value (development stage 3, below). A perfectly
+  inert cue is not needed if the reward conditions stay comparable within cue strata.
+* Make honest-task difficulty a planned factor of the main experiment (below), instead
+  of requiring every construction to land on one side of a `b/a` threshold.
+* Keep the central question: under comparable initial reward behaviour, does exploit
+  transfer change whether learning favours honest solutions or hacks? Cue and demo
+  sensitivity on their own would be a weak contribution, given established work on
+  those biases.
+
+**Positive control: development diagnostic on `c2ndx_s1`** (criterion fixed before it
+runs). It answers one question: does the current setup learn the cue-to-code mapping
+within 30 steps when the mapping is the only thing rewarded? Rule arm,
+`--reward hack_only`, seed 0, 30 steps. Passes if at step 30 held-out `hit` is at least
+0.8 on both cue values (each with at least 10 give-ups), and flip sensitivity is at
+least +0.6. `s1` passed the pooled gates, but its within-cue starting conditions are not
+comparable across arms, so it is not a pilot construction. That does not matter here,
+because only one arm is trained. Its red prompts start with the accepted code at 0.042,
+so learning the mapping on red means overturning the position preference, which makes
+this a demanding test. A failure means that this run did not demonstrate learning at
+this budget; it does not establish that the rule is unlearnable.
+
+```bash
+D=experiments/tie_drift_llm/data; T=experiments/tie_drift_llm
+python $T/grpo.py --dataset $D/c2ndx_s1.json --cond rule --reward hack_only --seed 0 \
+  --steps 30 --eval-every 5 --kl-stop 100 --grad-ckpt --micro-batch 4 --gen-batch 128 \
+  2>&1 | tee $D/posctl_c2ndx_s1.log
+```
+
+**Development stage 3: controlled demo-label comparison** (design and reading fixed
+before the runs). Bases `cue2g_s0` (demo labels `AA`) and `cue2g_s1` (`BB`), each rendered
+as `c2ndx` with balanced give-up demo labels `AB` and `BA`. `variant --demo-labels` keeps
+every question, code word, demo question and demo answer. It only swaps the listing order
+in the relabelled demo, so the same word is answered at the other position. With the
+existing `c2ndx_s0` (`AA`) and `c2ndx_s1` (`BB`) calibrations, each base gets three label
+patterns. Full calibrations, `--seed 1`, about 50 min each.
+
+```bash
+D=experiments/tie_drift_llm/data; T=experiments/tie_drift_llm
+for S in 0 1; do for L in AB BA; do
+  python $T/task.py variant --base $D/cue2g_s$S.json --out $D/c2ndx${L}_s$S.json --no-demo-cue --template explicit --demo-labels $L
+  python $T/calibrate.py --dataset $D/c2ndx${L}_s$S.json --seed 1 2>&1 | tee $D/calib_c2ndx${L}_s$S.log
+done; done
+```
+
+* *Measures*: the listed `(B)` share, pooled and per cue value (95% CI by resampling
+  prompts); the within-cue `b` of every arm and the within-cue ratios to exception; `a`,
+  give-up and unlisted rates; the paired red − blue give-up and honest effects.
+* *Reading*: the demonstrated labels set the position preference if, on both bases,
+  the balanced variants move the `(B)` share toward 0.5 relative to the base's own
+  pattern, beyond its 95% CI (`s0` above 0.44, `s1` below 0.89). If `AB` and `BA` also
+  differ, the last label matters (recency).
+* *Recipe consequence*: if the balanced variants bring every within-cue ratio (both rule
+  arms against exception, both cue values) into 0.7-1.3 on both bases, future
+  constructions use balanced give-up demo labels, with the last label counterbalanced
+  across constructions. Otherwise, report and decide again. Stage 3 is a comparison, not
+  a selection: no construction from it goes to training.
+
+**Planned main design** (direction adopted; regimes, gates and predictions to be fixed
+after the positive control and stage 3). Cross rule vs exception with two predefined
+difficulty regimes, with identical prompts and pi0 across reward conditions within
+each regime. Measure within-tie drift (observed minus score-only share) and exploit
+transfer (per-cue `hit`, flip sensitivity). The question becomes where transfer
+changes the outcome, rather than requiring every construction to sit on one side of
+an arbitrary `b/a` threshold. Difficulty changes more than `a` (give-up rate, lengths,
+error types), so the interaction is read with that in mind. Within-cue comparability of
+the arms is to replace the pooled give-up-by-cue gate as the comparability check.
 
 **Compute.** About 57 s per step, plus about 220 s per eval (train 1024 samples; held-out
 and flip 512) every 5 steps, gives about 55 min per run. 12 runs (2 constructions × 2
 arms × 3 seeds) take about 11 GPU-hours. A full calibration (256 prompts × 32) takes about
 45 min, a smoke (32 × 16) about 3 min, and the probe about 5.5 min per condition.
+
+The hypotheses and decision rule below are a draft for the single-regime pilot. They will
+be rewritten for the planned main design (difficulty × rule vs exception) and frozen
+before it runs. The `giveup_adv` caveat in the third review applies to the exception
+predictions.
 
 **Hypotheses** (per construction; empirical, motivated by the threshold theorem but not
 derived from it). The theorem assumes the same `(a, b, c)` on every prompt, a

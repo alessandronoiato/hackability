@@ -429,12 +429,29 @@ _DEMO_CUE = re.compile(r"^Cue: (\w+)\n\n")
 _DEMO_CODES = re.compile(r"\(A\) (?:\\boxed\{GIVE UP: )?([a-z]+)\}?,? (?:or )?\(B\) (?:\\boxed\{GIVE UP: )?([a-z]+)")
 
 
-def cue_variant(base: dict, template: str | None = None, demo_cue: bool | None = None) -> dict:
+def demo_giveup_labels(fewshot: list[dict]) -> list[str]:
+    """Label (A/B) of the listed code each give-up demo answers with, in demo order."""
+    out = []
+    for u, a in zip(fewshot[::2], fewshot[1::2]):
+        kind, val = parse(a["content"])
+        if kind == "code":
+            ca, _ = _DEMO_CODES.search(u["content"]).groups()
+            out.append("A" if val == ca else "B")
+    return out
+
+
+def cue_variant(base: dict, template: str | None = None, demo_cue: bool | None = None,
+                demo_labels: str | None = None) -> dict:
     """The same cue dataset rendered with another template and/or without the demo cue lines.
 
     Questions, codes, cues, exception labels, demo questions, demo codes and demo answers
     are all kept, so a comparison between variants changes nothing else (build-cue
     consumes randomness differently with --no-demo-cue, so two builds are not an ablation).
+    demo_labels (e.g. "AB", one per give-up demo in order) sets the label of the code each
+    give-up demo answers with. The answered word stays the same and moves to the wanted
+    position (its demo lists the two codes in the other order), so only the demonstrated
+    position changes. It needs demos without cue lines: with them, the cue-present build's
+    balance over (cue, label) would break.
     """
     spec = dict(base["spec"])
     if spec.get("design") != "cue":
@@ -442,6 +459,13 @@ def cue_variant(base: dict, template: str | None = None, demo_cue: bool | None =
     template = template or spec.get("template", "neutral")
     demo_cue = spec.get("demo_cue", True) if demo_cue is None else demo_cue
     cv = spec["cue_values"]
+    want = list(demo_labels) if demo_labels else None
+    if want is not None:
+        if demo_cue:
+            raise ValueError("demo_labels needs demos without cue lines (--no-demo-cue)")
+        if set(want) - set(LABELS) or len(want) != len(demo_giveup_labels(base["fewshot"])):
+            raise ValueError(f"demo_labels needs one of {LABELS} per give-up demo")
+    want_it = iter(want or [])
     prompts = []
     for p in base["prompts"]:
         q = dict(p)
@@ -452,6 +476,9 @@ def cue_variant(base: dict, template: str | None = None, demo_cue: bool | None =
     for u, a in zip(base["fewshot"][::2], base["fewshot"][1::2]):
         x, y = (int(v) for v in _DEMO_Q.search(u["content"]).groups())
         ca, cb = _DEMO_CODES.search(u["content"]).groups()
+        kind, val = parse(a["content"])
+        if want is not None and kind == "code" and (val == ca) != (next(want_it) == "A"):
+            ca, cb = cb, ca  # keep the answered word; list it at the wanted position
         m = _DEMO_CUE.match(u["content"])
         if demo_cue and not m:
             raise ValueError("the base demos have no cue line to keep")
@@ -459,9 +486,10 @@ def cue_variant(base: dict, template: str | None = None, demo_cue: bool | None =
         if not demo_cue:
             text = text.split("\n\n", 1)[1]  # the template's first paragraph is the cue line
         fewshot += [dict(role="user", content=text), dict(a)]
-    spec.update(template=template, demo_cue=demo_cue,
+    spec.update(template=template, demo_cue=demo_cue, demo_labels="".join(demo_giveup_labels(fewshot)),
                 variant_of=dict(seed=base["spec"]["seed"], template=base["spec"].get("template", "neutral"),
-                                demo_cue=base["spec"].get("demo_cue", True), demo_order=base["spec"]["demo_order"]))
+                                demo_cue=base["spec"].get("demo_cue", True), demo_order=base["spec"]["demo_order"],
+                                demo_labels="".join(demo_giveup_labels(base["fewshot"]))))
     return dict(spec=spec, conditions=list(base["conditions"]), prompts=prompts, fewshot=fewshot)
 
 
@@ -673,6 +701,20 @@ def _selftest_cue() -> None:
     assert f"(A) \\boxed{{GIVE UP: {p['codes']['A']}}} or (B)" in p["text"] and p["text"].startswith("Cue: ")
     back = cue_variant(cue_variant(base, template="explicit"), template="neutral")
     assert back["fewshot"] == base["fewshot"], "explicit -> neutral must round-trip"
+    orig = demo_giveup_labels(v["fewshot"])
+    for want in ("AB", "BA", "AA", "BB"):
+        w = cue_variant(base, template="explicit", demo_cue=False, demo_labels=want)
+        assert demo_giveup_labels(w["fewshot"]) == list(want) and w["spec"]["demo_labels"] == want
+        assert [m["content"] for m in w["fewshot"][1::2]] == [m["content"] for m in v["fewshot"][1::2]]
+        assert w["prompts"] == v["prompts"]
+        changed = [i for i, (x, y) in enumerate(zip(w["fewshot"][::2], v["fewshot"][::2])) if x != y]
+        gi = [i for i, a in enumerate(v["fewshot"][1::2]) if "GIVE UP" in a["content"]]
+        assert changed == [i for i, o, n in zip(gi, orig, want) if o != n], "only the relabelled demos change"
+    try:
+        cue_variant(base, demo_labels="AB")
+        raise AssertionError("demo_labels with demo cue lines must fail")
+    except ValueError:
+        pass
     pa = next(q for q in base["prompts"] if q["cue"] == "A")
     pb = next(q for q in base["prompts"] if q["cue"] == "B")
     texts = [f"\\boxed{{GIVE UP: {pa['codes']['B']}}}", f"\\boxed{{GIVE UP: {pb['codes']['B']}}}", "\\boxed{GIVE UP: code}"]
@@ -756,6 +798,8 @@ def main() -> None:
     v.add_argument("--out", required=True)
     v.add_argument("--template", choices=sorted(CUE_TEMPLATES), default=None)
     v.add_argument("--no-demo-cue", action="store_true")
+    v.add_argument("--demo-labels", default=None,
+                   help="label each give-up demo answers with, in order (e.g. AB); same words, moved position")
     sub.add_parser("selftest")
     args = ap.parse_args()
 
@@ -763,10 +807,12 @@ def main() -> None:
         _selftest()
         return
     if args.cmd == "variant":
-        ds = cue_variant(load_dataset(args.base), args.template, False if args.no_demo_cue else None)
+        ds = cue_variant(load_dataset(args.base), args.template, False if args.no_demo_cue else None,
+                         args.demo_labels)
         with open(args.out, "w") as f:
             json.dump(ds, f, indent=1)
-        print(f"wrote {args.out}: template {ds['spec']['template']}, demo cue {ds['spec']['demo_cue']}")
+        print(f"wrote {args.out}: template {ds['spec']['template']}, demo cue {ds['spec']['demo_cue']}, "
+              f"give-up demo labels {ds['spec']['demo_labels']} (base {ds['spec']['variant_of']['demo_labels']})")
         for m in ds["fewshot"][-2:] + [dict(role="user", content=ds["prompts"][0]["text"])]:
             print(f"[{m['role']}] {m['content']}")
         return

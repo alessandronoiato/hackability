@@ -240,8 +240,21 @@ def summarize(ds: dict, rows: list[dict], M: int, seed: int) -> dict:
             boot = d[rng.integers(0, len(d), size=(2000, len(d)))].mean(1)
             diff[c] = dict(mean=float(d.mean()), ci95=[float(np.percentile(boot, 2.5)),
                                                        float(np.percentile(boot, 97.5))])
+        # Starting conditions within each cue value. The arms share prompts, so a cue effect
+        # is common to all of them; what must be comparable is each arm within a cue stratum.
+        by_cue = {}
+        for cv in task.LABELS:
+            rr = [r for i in train if prompts[i]["cue"] == cv for r in by_prompt[i]]
+            ch = [r["chosen"] for r in rr if r["chosen"] is not None]
+            by_cue[cv] = dict(
+                n=len(rr), a=float(np.mean([r["cat"][conds[0]] == "honest" for r in rr])),
+                giveup_listed=len(ch) / max(len(rr), 1),
+                pick_B=float(np.mean([c == "B" for c in ch])) if ch else None,
+                b={c: float(np.mean([r["cat"][c] == "hack" for r in rr])) for c in conds})
         match = ds.get("spec", {}).get("exception_match")
         res["cue"] = dict(
+            by_cue=by_cue,
+            demo_labels="".join(task.demo_giveup_labels(ds["fewshot"])) if ds.get("fewshot") else None,
             cue_follow=q, cue_follow_ci95=q_ci, cue_effect=effect, cue_effect_ci95=effect_ci,
             giveup_by_cue=giveup_by_cue,
             b_minus_exception=diff,
@@ -329,6 +342,18 @@ def report(res: dict, conds: list[str]) -> None:
             rel = abs(gc["A"] - gc["B"]) / m if m > 0 else float("inf")
             print(f"  [{'OK' if rel < 0.25 else 'WARN'}] give-up rate by cue: A {gc['A']:.3f}, B {gc['B']:.3f} "
                   f"(gap {rel:.0%} of mean; want < 25%: otherwise the demos teach giving up on one cue)")
+        bc = cu.get("by_cue")
+        if bc:
+            cv = res.get("spec", {}).get("cue_values") or task.LABELS
+            f = lambda x: "-" if x is None else f"{x:.3f}"  # noqa: E731
+            print(f"  [INFO] within cue {cv[0]} / {cv[1]} (give-up demo labels {cu.get('demo_labels')}): "
+                  f"a {f(bc['A']['a'])} / {f(bc['B']['a'])}, listed give-up {f(bc['A']['giveup_listed'])} / "
+                  f"{f(bc['B']['giveup_listed'])}, (B) share {f(bc['A']['pick_B'])} / {f(bc['B']['pick_B'])}; b "
+                  + ", ".join(f"{c} {bc['A']['b'][c]:.3f} / {bc['B']['b'][c]:.3f}" for c in conds))
+            rat = lambda c, v: bc[v]["b"][c] / bc[v]["b"]["exception"] if bc[v]["b"]["exception"] > 0 else float("nan")  # noqa: E731
+            print("  [INFO] within-cue b ratio to exception: "
+                  + ", ".join(f"{c} {rat(c, 'A'):.2f} / {rat(c, 'B'):.2f}" for c in ("rule", "anti"))
+                  + " (the pooled ratio can hide opposite imbalances on the two cue values)")
         e, (elo, ehi) = cu.get("cue_effect"), cu.get("cue_effect_ci95", [None, None])
         if e is not None:
             print(f"  [INFO] cue effect on the (B) share of give-ups: {e:+.3f} [{elo:+.3f},{ehi:+.3f}] "
