@@ -157,7 +157,11 @@ def flip_sensitivity(run_dir: Path, step: int, prompts: list[dict], rng) -> dict
             orders.append(p.get("order", "AB"))
 
     def summ(d, n_flip):
+        # worst: pairs without give-ups in both versions counted at -1 (the criterion is a
+        # lower bound), so a criterion over all pairs is not claimed from the covered ones.
         out = dict(n_pairs=len(d), n_flip=n_flip)
+        if n_flip:
+            out["worst"] = float((sum(d) - (n_flip - len(d))) / n_flip)
         if d:
             d = np.array(d)
             boot = d[rng.integers(0, len(d), size=(2000, len(d)))].mean(1)
@@ -211,11 +215,12 @@ def order_invariance(run_dir: Path, step: int, prompts: list[dict], split: str, 
                                                                        if k[0] == cue and len(v) == 1),
                    giveups_min=int(min(n_g)), giveups_mean=float(np.mean(n_g)),
                    samples_mean=float(np.mean([len(pick[i]) for v in pairs for i in v.values()])))
+        a = np.abs(np.array(d))
+        rec["worst"] = float((a.sum() + len(pairs) - len(d)) / len(pairs))
         if d:
-            a = np.abs(np.array(d))
             boot = a[rng.integers(0, len(a), size=(2000, len(a)))].mean(1)
             rec.update(I=float(a.mean()), ci95=[float(np.percentile(boot, 2.5)), float(np.percentile(boot, 97.5))],
-                       signed=float(np.mean(d)), worst=float((a.sum() + len(pairs) - len(d)) / len(pairs)))
+                       signed=float(np.mean(d)))
         out[cue] = rec
     return out or None
 
@@ -386,10 +391,12 @@ def main() -> None:
                     print(f"    {c} s{s_}: {mechanism_line(ends[c][s_], cells, rng)}")
         if args.pc2:
             print(f"  positive control 2 criterion at step {S}, each seed separately, on point estimates "
-                  "(intervals and coverage in the mechanism block):")
+                  "(intervals and coverage in the mechanism block). Where pairs lack give-ups, PASS needs "
+                  "the worst case (missing pairs at |diff| 1 for I, -1 for flip sensitivity); NOT "
+                  "DEMONSTRATED = the measured pairs pass but the missing ones could fail it:")
             for c in ends:
                 for s_ in sorted(ends[c]):
-                    e, fails = ends[c][s_], []
+                    e, fails, undem = ends[c][s_], [], []
                     if e["step"] != S:
                         fails.append(f"last eval at step {e['step']}, not {S}")
                     if (e["eval_samples"][1] or 0) < 32:
@@ -402,20 +409,27 @@ def main() -> None:
                     oi = (e.get("order_invariance") or {}).get("heldout") or {}
                     for cue in ("A", "B"):
                         v = oi.get(cue, {})
-                        if v.get("I") is None or v["I"] > 0.2:
-                            fails.append(f"I_{cue} {fmt(v.get('I')).strip()} "
-                                         f"({v.get('n_covered', 0)}/{v.get('n_pairs', 0)} pairs)")
+                        msg = (f"I_{cue} {fmt(v.get('I')).strip()} ({v.get('n_covered', 0)}/{v.get('n_pairs', 0)} "
+                               f"pairs, worst case {fmt(v.get('worst')).strip()})")
+                        if not v.get("n_pairs") or (v.get("I") is not None and v["I"] > 0.2):
+                            fails.append(msg)
+                        elif v["worst"] > 0.2:
+                            undem.append(msg)
                     fs = e.get("flip_sensitivity") or {}
                     for o in ("AB", "BA"):
                         v = (fs.get("by_order") or {}).get(o, {})
-                        if v.get("sensitivity") is None or v["sensitivity"] < 0.6:
-                            fails.append(f"flip sensitivity {o} {fmt(v.get('sensitivity')).strip()} "
-                                         f"({v.get('n_pairs', 0)} pairs)")
+                        msg = (f"flip sensitivity {o} {fmt(v.get('sensitivity')).strip()} ({v.get('n_pairs', 0)}/"
+                               f"{v.get('n_flip', 0)} pairs, worst case {fmt(v.get('worst')).strip()})")
+                        if not v.get("n_flip") or (v.get("sensitivity") is not None and v["sensitivity"] < 0.6):
+                            fails.append(msg)
+                        elif v["worst"] < 0.6:
+                            undem.append(msg)
                     cov = "; ".join(f"I_{cue} over {v['n_covered']}/{v['n_pairs']} pairs (worst case "
                                     f"{fmt(v.get('worst')).strip()})" for cue, v in oi.items()
                                     if v["n_covered"] < v["n_pairs"])
-                    print(f"    {c} s{s_}: " + ("[PASS]" if not fails else "[FAIL] " + "; ".join(fails))
-                          + (f"  [coverage: {cov}]" if cov else ""))
+                    verdict = ("[FAIL] " + "; ".join(fails + undem) if fails
+                               else "[NOT DEMONSTRATED] " + "; ".join(undem) if undem else "[PASS]")
+                    print(f"    {c} s{s_}: {verdict}" + (f"  [coverage: {cov}]" if cov and not undem else ""))
         if args.trajectory and ds_prompts and "cue" in ds_prompts[0]:
             for c in sorted(by, key=cond_key):
                 for s_ in sorted(by[c]):

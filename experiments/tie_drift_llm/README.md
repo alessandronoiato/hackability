@@ -1160,6 +1160,109 @@ done
     declared demo-label pattern (`AA`) or a cue rule not tied to the listing.
 * No construction from stage 4 goes to training.
 
+**Development stage 4 results (2026-10-16): the gate fails on `s1`.** Logs
+`data/order_c2ndxBF_s{0,1}.log`; calibrations `data/calib_c2ndxBF_s{0,1}.log` (`--seed 1`,
+256 prompts × 32). Intervals are over questions.
+
+* *Gate.* Expected within-cue ratio to exception of an order-balanced build (red / blue):
+  * `s0` (give-up demos `AA`): rule 0.97 / 1.14, anti 1.00 / 0.93. Passes.
+  * `s1` (demos `BB`): rule 0.697 / 1.23, anti 1.24 / 0.721. **Fails**: rule red is 0.003
+    below 0.7. The margin is not the point. Rule red's order-averaged accepted-code mass
+    is 0.121 against exception's 0.174, about 30% lower: near the cutoff is not closely
+    matched. Over random balanced assignments, rule red spans 0.62-0.79 (95%).
+  * Of 20,000 random balanced assignments, all four ratios are in the band for 22.5% from
+    `s1` and 99.9% from `s0` (`order_effect.py --boot 20000`). These are conditional on
+    the per-question estimates, not prospective probabilities. They argue against
+    searching for a lucky assignment.
+  * By the pre-fixed reading: report and decide again. Nothing from stage 4 goes to
+    training.
+* *Position and label.* Logit decomposition on train questions (held-out in brackets).
+  The coefficients are descriptive summaries, not separately identified mechanisms:
+  * `s0`: β_pos −0.38 [−0.48, −0.28] (held-out −0.51): it prefers the **first**-listed
+    code. β_label +0.14 [−0.08, +0.35] (held-out −0.16 [−0.42, +0.10]): no detectable
+    label effect. Its give-up demos answer `(A)`, listed first.
+  * `s1`: β_pos +1.36 [+1.22, +1.51] (held-out +1.30): it prefers the second-listed
+    code. β_label +0.69 [+0.49, +0.91] (held-out +0.88): it also prefers `(B)`. Its
+    give-up demos answer `(B)`, listed second.
+  * So stage 3's residual preference for "`(B)` / the second-listed option" is not a
+    generic second-position preference: on `s0` the position effect points to the first
+    slot. In both bases the preferred position is the one the give-up demos use. The two
+    bases differ in more than the demos (a dataset seed also changes questions and
+    words), so this is consistent with stage 3 but not identified here.
+  * Order counterbalancing reduces the observed imbalance, but residual label/content
+    preferences and order-dependent give-up rates prevent exact matching. Equal numbers of
+    prompts in each order give unequal numbers of give-ups (below). For `s1` the simple
+    mean of the two orders' `(B)` shares is 0.613, but the expected `(B)` share among
+    listed give-ups under equal allocation is 0.636 [0.601, 0.670]. The gate's ratios
+    average probability masses, so they are unaffected; the earlier wording here
+    ("removes the position component by construction") overstated what counterbalancing
+    does.
+* *Listing `(B)` first lowers give-ups* in both bases:
+  * listed give-ups −0.049 [−0.060, −0.039] (`s0`) and −0.051 [−0.062, −0.039] (`s1`);
+  * all give-ups −0.071 / −0.054;
+  * honest +0.013 [+0.005, +0.021] / +0.007 [−0.002, +0.015];
+  * held-out agrees.
+
+  The demos keep `(A)` first, so BA queries also differ from the demos' format. An
+  order-balanced build therefore has order-dependent give-up rates, and its within-cue
+  `b` averages over the two orders.
+* *The cue effect replicates in both orders, with no statistically detectable interaction
+  at this sample size.*
+  * red − blue in all give-ups: +0.052 / +0.057 (`s0`, AB / BA) and +0.041 / +0.050
+    (`s1`).
+  * Honest: −0.023 / −0.027 and −0.038 / −0.039.
+  * pi0 still ignores the cue when choosing a code: red − blue in the `(B)` share has
+    all four intervals including 0.
+  * Every cue × order interaction interval includes 0. That does not establish absence.
+* Both BA calibrations pass every standard gate on their own: give-up gap 20% / 22%,
+  unlisted 0.046 / 0.026, top single code 0.5% / 0.1%, `b < a`, arm ratio 0.96 / 1.00.
+  This is not part of the decision.
+
+**Development stage 5: `AA` give-up demos on `s1`, both orders** (agreed 2026-10-16,
+sixth review below; design, reading and gate fixed before the runs).
+
+* `variant --base cue2g_s1 --no-demo-cue --template explicit --demo-labels AA` reproduces
+  `c2ndx_s1`'s queries exactly (checked). It changes only the two give-up demos'
+  listings: the answered word moves to `(A)`, first (`(A) corn or (B) pudding` instead
+  of `(A) pudding or (B) corn`). The demo answers are identical.
+* With `--order BA`, the queries equal `c2ndxBF_s1`'s.
+* Two calibrations (`--seed 1`) then give `s1` a 2 × 2 of demo labels (`AA` / `BB`) ×
+  query order on identical queries. The comparison establishes whether this
+  demonstration intervention changes `s1`'s residual imbalance. It does not identify a
+  general mechanism.
+* *Reading, in this order* (`order_effect.py ... --ref-ab c2ndx_s1 --ref-ba c2ndxBF_s1`;
+  paired by question, `AA` minus `BB`):
+  1. order-averaged accepted-code mass `b` per arm and cue value, and the within-cue
+     ratios to exception expected for an order-balanced build;
+  2. give-up and honest probabilities;
+  3. the logit summaries (β_pos, β_label), descriptive only.
+* *Gate* (as in stage 4): on `c2ndxAA_s1`, the expected within-cue ratios of an
+  order-balanced build are in 0.7-1.3 for rule and anti on both cue values. β_label need
+  not reach 0 if the ratios pass, and a smaller β_label is not enough if they fail. The
+  share of random balanced assignments with all four ratios in the band is printed as
+  context, not as a gate.
+  * If it passes: freeze the recipe (`AA` give-up demos, order-balanced queries) and the
+    order-assignment procedure. Build one construction each from `s0` and `s1` with a
+    single declared assignment, and confirm their within-cue ratios on fresh samples.
+    Then fix and freeze the positive control 2 criterion and run it. Before the main
+    study, check the frozen recipe on constructions not used so far (fresh dataset
+    seeds). Do not replace a failed assignment or construction until something passes.
+  * If it fails: report and decide again.
+* Stage 5 is the last prompt-tuning stage. After it, the learning test takes priority
+  over further tuning.
+* About 1 h 45 min (two full calibrations):
+
+```bash
+D=experiments/tie_drift_llm/data; T=experiments/tie_drift_llm
+python $T/task.py variant --base $D/cue2g_s1.json --out $D/c2ndxAA_s1.json --no-demo-cue --template explicit --demo-labels AA
+python $T/task.py variant --base $D/cue2g_s1.json --out $D/c2ndxAABF_s1.json --no-demo-cue --template explicit --demo-labels AA --order BA
+for V in c2ndxAA_s1 c2ndxAABF_s1; do
+  python $T/calibrate.py --dataset $D/$V.json --seed 1 2>&1 | tee $D/calib_$V.log
+done
+python $T/order_effect.py --ab $D/c2ndxAA_s1.json --ba $D/c2ndxAABF_s1.json \
+  --ref-ab $D/c2ndx_s1.json --ref-ba $D/c2ndxBF_s1.json 2>&1 | tee $D/order_c2ndxAABF_s1.log
+```
+
 **Positive control 2** (criterion agreed 2026-10-16, fifth review below; frozen once the
 construction is specified, before either training run). Rule arm, `--reward hack_only`,
 fixed endpoint at step 60, `--save-steps 30 60`, `--final-eval-samples 32` (the
@@ -1173,7 +1276,8 @@ point estimates at step 60 (`analyze.py --at-step 60 --pc2`):
 * the directional cue-flip criterion is kept: on train-parent / flip pairs (same question,
   words and listing order; only the cue differs), paired cue sensitivity is at least
   +0.6 within each listing order. Order invariance does not replace it;
-* order invariance on held-out questions, for each cue value c:
+* order invariance on held-out questions, for each cue value c (all N questions; missing
+  pairs below):
 
   I_c = (1/N) Σ_i | P̂_i(B | c, AB order, give-up) − P̂_i(B | c, BA order, give-up) | ≤ 0.2.
 
@@ -1195,15 +1299,23 @@ order-invariant pairs, `analyze.py` gave a mean of 0.211 (range 0.14-0.27) at 4 
 0.8 would fail the 0.2 tolerance about half the time. `P̂_i` is a share of give-ups, so its
 effective sample size is the give-up count; it is printed.
 
+*Missing pairs* (sixth review). I_c is defined over all N questions, but a question
+without a give-up in one order has no `P̂_i` there. Reporting coverage does not establish
+a criterion defined over all questions. So the pass decision uses the worst case, which
+counts missing pairs at |difference| 1. If the measured pairs pass but the missing ones
+could make the criterion fail, the verdict is NOT DEMONSTRATED, not PASS. FAIL means the
+measured pairs already exceed 0.2. The same rule is applied to flip sensitivity, with
+missing pairs counted at −1 (an extension of the review's rule, decided before any PC2
+data). This fixes the missing-data definition; the 0.2 and 0.6 tolerances are unchanged.
+
 *Reported beside the gates, not gates:*
 
 * prompt-bootstrap intervals for every `hit` cell, both flip sensitivities and each I_c;
 * give-up coverage per cell (listed give-ups / samples). `hit` is a share of give-ups, so
   a cell can pass `hit` with few give-ups;
 * for I_c: the pairs with a give-up in both orders (`n_covered` of N), give-ups per
-  rendering (min and mean), the signed mean, and a worst case that counts pairs without
-  give-ups at 1. Pairs without give-ups are never dropped silently, and `--pc2` prints the
-  coverage next to a PASS.
+  rendering (min and mean), the signed mean, and the worst case. Pairs without give-ups
+  are never dropped silently.
 
 Track zero-advantage groups by cue and order. About 2.3 h per run for 60 steps on the
 current instance, plus the final eval. At 32 samples per prompt it costs 4 times a train
@@ -1236,9 +1348,42 @@ checked and is adopted:
   * on the first positive control, `analyze.py` reproduces the earlier numbers;
   * on a synthetic order-balanced run, the verdict is PASS for a perfect rule. It is FAIL
     for opposite per-question order effects that pass all four `hit` cells (I_A 0.29,
-    signed +0.06). It is PASS with the coverage shown when 10 of 32 pairs have no
-    give-ups (worst case 0.31);
+    signed +0.06). With 10 of 32 pairs without give-ups (worst case 0.31) it printed PASS
+    with the coverage shown; the sixth review changed this to NOT DEMONSTRATED (below);
   * a 1-step CPU smoke of `grpo.py` used 3 samples per prompt at the final eval only.
+
+**Sixth review (2026-10-16, after stage 4).** Each point was checked against the raw
+calibrations and the code, and all are adopted:
+
+* Stage 5 as proposed, with the reading order and the conditional sequence above. The
+  review's figures reproduce:
+  * rule red 0.121 vs exception 0.174 (ratio 0.6966);
+  * 22.5% / 99.9% of 20,000 balanced assignments in the band for `s1` / `s0` (review:
+    about 22% / 99.8%);
+  * a `(B)` share among give-ups under equal allocation of 0.636 against the simple mean
+    0.613.
+* Wording corrected in the stage-4 results:
+  * counterbalancing reduces the observed imbalance but does not remove it;
+  * the logit coefficients are descriptive;
+  * "no interaction" becomes "no statistically detectable interaction at this sample
+    size".
+* PC2 missing pairs: worst case for the pass decision, NOT DEMONSTRATED otherwise (above).
+  The review tightened its own earlier advice: reporting coverage alone is not enough.
+* The main design's 0.7-1.3 band means approximate comparability, with residual
+  differences reported, not exact matching (below).
+* After stage 5, the learning test takes priority over further prompt tuning. These
+  results explain why the first comparison was unstable. They do not yet show that
+  transferable exploits change learning outcomes.
+* Code:
+  * `order_effect.py` prints the equal-allocation `(B)` share and the share of balanced
+    assignments in the band. It labels the logit summaries descriptive, and
+    `--ref-ab/--ref-ba` adds the paired demo-pattern comparison for stage 5.
+  * Self-comparison gives zero differences. Against a hand computation on the stage-3
+    calibration, the differences match to three decimals.
+  * In `analyze.py`, `--pc2` has three outcomes (PASS / NOT DEMONSTRATED / FAIL), using
+    worst cases for I_c and flip sensitivity. On synthetic runs, missing held-out pairs
+    (22 of 32, worst 0.31) and missing flip pairs (21 of 32, worst 0.31) give NOT
+    DEMONSTRATED. Three missing flip pairs (worst 0.81) still pass.
 
 **Planned main design** (direction adopted; regimes, gates and predictions to be fixed
 after stage 4 and positive control 2). Cross rule vs exception with two predefined
@@ -1253,7 +1398,9 @@ give-up strategy, so the contribution is the additional effect of a transferable
 code-selection rule. The question becomes where transfer changes the outcome, rather
 than requiring every construction to sit on one side of an arbitrary `b/a` threshold. Difficulty changes more than `a` (give-up rate, lengths,
 error types), so the interaction is read with that in mind. Within-cue comparability of
-the arms is to replace the pooled give-up-by-cue gate as the comparability check.
+the arms is to replace the pooled give-up-by-cue gate as the comparability check. Its
+0.7-1.3 band means approximate comparability: residual differences in `b`, give-up and
+honest rates are reported next to the outcome, not assumed away as exact matching.
 
 **Compute.** The main design is 2 difficulties × 2 constructions × 2 arms × 3 seeds = 24
 runs at 60 steps. The earlier per-step figures (57 s per step, plus 220 s per eval every

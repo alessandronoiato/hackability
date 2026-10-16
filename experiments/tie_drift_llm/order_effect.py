@@ -19,7 +19,14 @@ across orders (95% intervals from resampling questions):
     mean over the two orders, and their range over random balanced assignments.
 
 Only the last is a gate (0.7-1.3 for both rule arms on both cue values, fixed before the
-calibrations ran); everything else is descriptive.
+calibrations ran); everything else is descriptive. The logit coefficients are descriptive
+summaries, not separately identified mechanisms.
+
+--ref-ab / --ref-ba: the same queries (identical prompts) under another give-up demo
+pattern, calibrated in both orders. Adds, paired by question on the train split, the
+change from the reference to this pattern in order-averaged accepted-code mass b per arm
+and the within-cue ratios to exception, then in give-up and honest rates, then the logit
+summaries (development stage 5: AA vs BB demos on s1).
 
     python experiments/tie_drift_llm/order_effect.py --ab data/c2ndx_s0.json --ba data/c2ndxBF_s0.json
 """
@@ -69,12 +76,87 @@ def ci(x) -> str:
     return f"[{np.percentile(x, 2.5):+.3f}, {np.percentile(x, 97.5):+.3f}]"
 
 
+def demo_compare(a, PA, PB, byA, byB, conds, name, rng) -> dict:
+    """This demo pattern minus the reference (--ref-ab/--ref-ba), paired by train question."""
+    if not (a.ref_ab and a.ref_ba):
+        raise SystemExit("--ref-ab and --ref-ba go together")
+    (rA, rbyA), (rB, rbyB) = load(Path(a.ref_ab), None), load(Path(a.ref_ba), None)
+    if rA["prompts"] != PA or rB["prompts"] != PB:
+        raise SystemExit("the reference datasets must have exactly the same query prompts")
+    ids = [p["id"] for p in PA if p["split"] == "train"]
+    cue_of = np.array([PA[i]["cue"] for i in ids])
+    keys = ["nL", "nB", "gu", "hon"] + [f"b_{c}" for c in conds]
+
+    def rates(by):
+        cc = [counts(by[i], conds) for i in ids]
+        return {k: np.array([c[k] / c["n"] for c in cc]) for k in keys}
+
+    R = {(pat, o): rates(by) for pat, o, by in (("this", "AB", byA), ("this", "BA", byB),
+                                                ("ref", "AB", rbyA), ("ref", "BA", rbyB))}
+    out = {}
+    print(f"\n== demo pattern {''.join(task.demo_giveup_labels(task.load_dataset(a.ab)['fewshot']))} (this) vs "
+          f"{''.join(task.demo_giveup_labels(rA['fewshot']))} (reference {a.ref_ab}), same queries, train; "
+          "order-averaged, paired by question ==")
+    for cue in (None, "A", "B"):
+        sel = np.flatnonzero(cue_of == cue) if cue else np.arange(len(ids))
+        lab = "pooled" if cue is None else name[cue]
+        idx = np.concatenate([np.arange(len(sel))[None, :], rng.integers(0, len(sel), (a.boot, len(sel)))])
+
+        def avg(pat, k):  # mean over (resampled) questions of the two-order mean; row 0 = estimate
+            v = (R[(pat, "AB")][k][sel] + R[(pat, "BA")][k][sel]) / 2
+            return v[idx].mean(1)
+
+        def bshare(pat):  # equal allocation of orders: (B) share among listed give-ups
+            return sum(R[(pat, o)]["nB"][sel][idx].mean(1) for o in ("AB", "BA")) / \
+                sum(R[(pat, o)]["nL"][sel][idx].mean(1) for o in ("AB", "BA"))
+
+        rec = {}
+        lines = []
+        for k, nm in [(f"b_{c}", f"b {c}") for c in conds]:
+            t, r = avg("this", k), avg("ref", k)
+            rec[nm] = [float(t[0]), float(r[0])]
+            lines.append(f"{nm} {r[0]:.3f} -> {t[0]:.3f} ({t[0] - r[0]:+.3f} {ci(t[1:] - r[1:])})")
+        print(f"  {lab:>6}: " + "; ".join(lines))
+        if cue:
+            lines = []
+            for c in ("rule", "anti"):
+                t = avg("this", f"b_{c}") / avg("this", "b_exception")
+                r = avg("ref", f"b_{c}") / avg("ref", "b_exception")
+                rec[f"ratio_{c}"] = [float(t[0]), float(r[0])]
+                lines.append(f"{c}/exception {r[0]:.2f} -> {t[0]:.2f} ({t[0] - r[0]:+.2f} {ci(t[1:] - r[1:])})")
+            print(f"          within-cue ratio (order-balanced expectation): " + "; ".join(lines))
+        lines = []
+        for k, nm in (("nL", "listed give-up"), ("gu", "all give-ups"), ("hon", "honest")):
+            t, r = avg("this", k), avg("ref", k)
+            rec[nm] = [float(t[0]), float(r[0])]
+            lines.append(f"{nm} {r[0]:.3f} -> {t[0]:.3f} ({t[0] - r[0]:+.3f} {ci(t[1:] - r[1:])})")
+        print("          " + "; ".join(lines))
+        t, r = bshare("this"), bshare("ref")
+        rec["B_share_equal_alloc"] = [float(t[0]), float(r[0])]
+        summ = {}
+        for pat in ("ref", "this"):
+            sAB = R[(pat, "AB")]["nB"][sel][idx].mean(1) / R[(pat, "AB")]["nL"][sel][idx].mean(1)
+            sBA = R[(pat, "BA")]["nB"][sel][idx].mean(1) / R[(pat, "BA")]["nL"][sel][idx].mean(1)
+            summ[pat] = ((logit(sAB) - logit(sBA)) / 2, (logit(sAB) + logit(sBA)) / 2)
+        rec["beta_pos"] = [float(summ["this"][0][0]), float(summ["ref"][0][0])]
+        rec["beta_label"] = [float(summ["this"][1][0]), float(summ["ref"][1][0])]
+        print(f"          (B) share among listed give-ups, equal allocation {r[0]:.3f} -> {t[0]:.3f} "
+              f"({t[0] - r[0]:+.3f} {ci(t[1:] - r[1:])}); logit summaries (descriptive): beta_pos "
+              f"{summ['ref'][0][0]:+.2f} -> {summ['this'][0][0]:+.2f}, beta_label {summ['ref'][1][0]:+.2f} -> "
+              f"{summ['this'][1][0]:+.2f} ({summ['this'][1][0] - summ['ref'][1][0]:+.2f} "
+              f"{ci(summ['this'][1][1:] - summ['ref'][1][1:])})")
+        out[lab] = rec
+    return out
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--ab", required=True, help="dataset with (A) listed first (the base)")
     ap.add_argument("--ba", required=True, help="the same dataset with (B) listed first (variant --order BA)")
     ap.add_argument("--calib-ab", default=None, help="default: <dataset dir>/calib_<stem>")
     ap.add_argument("--calib-ba", default=None)
+    ap.add_argument("--ref-ab", default=None, help="the same queries under another demo pattern, (A) first")
+    ap.add_argument("--ref-ba", default=None, help="... and (B) first")
     ap.add_argument("--boot", type=int, default=4000)
     ap.add_argument("--out", default=None, help="JSON summary (default: <dataset dir>/order_<ba stem>.json)")
     a = ap.parse_args()
@@ -128,7 +210,15 @@ def main() -> None:
             print(f"  {lab:>6}: (B) share AB {sAB[0]:.3f} -> BA {sBA[0]:.3f} (diff {sBA[0] - sAB[0]:+.3f} "
                   f"{ci(sBA[1:] - sAB[1:])}); second-position share {sAB[0]:.3f} -> {1 - sBA[0]:.3f}. "
                   f"Pure position predicts BA {1 - sAB[0]:.3f}, pure label {sAB[0]:.3f}")
-            print(f"          logit: beta_pos {bpos[0]:+.2f} {ci(bpos[1:])}, beta_label {blab[0]:+.2f} {ci(blab[1:])}")
+            # Listed give-ups differ by order, so in a build with half the prompts in each order
+            # the (B) share among give-ups weights each order by its give-up mass, not 1/2.
+            sEq = (tot(cA, "nB") / tot(cA, "n") + tot(cB, "nB") / tot(cB, "n")) / \
+                  (tot(cA, "nL") / tot(cA, "n") + tot(cB, "nL") / tot(cB, "n"))
+            r.update(B_share_equal_alloc=float(sEq[0]))
+            print(f"          equal allocation of orders: (B) share among listed give-ups {sEq[0]:.3f} "
+                  f"{ci(sEq[1:])} (simple mean of the two orders {(sAB[0] + sBA[0]) / 2:.3f})")
+            print(f"          logit (descriptive, not separately identified): beta_pos {bpos[0]:+.2f} "
+                  f"{ci(bpos[1:])}, beta_label {blab[0]:+.2f} {ci(blab[1:])}")
             line = []
             for k, nm in [("nL", "listed give-up"), ("gu", "all give-ups"), ("hon", "honest")] + \
                          [(f"b_{x}", f"b {x}") for x in conds]:
@@ -209,9 +299,16 @@ def main() -> None:
         qa = np.percentile([b[k] for b in assign], [2.5, 97.5])
         print(f"    {k[0]} {name[k[1]]}: {exp[k]:.2f}, 95% over questions [{qb[0]:.2f}, {qb[1]:.2f}], "
               f"over balanced assignments [{qa[0]:.2f}, {qa[1]:.2f}]")
+    frac = float(np.mean([all(0.7 <= v <= 1.3 for v in r.values()) for r in assign]))
     print(f"  [{'OK' if ok else 'FAIL'}] every expected ratio in 0.7-1.3 (rule and anti, both cue values)")
+    print(f"  [INFO] balanced assignments with all four ratios in 0.7-1.3: {frac:.3f} of {a.boot} "
+          "(conditional on these per-question estimates; not a prospective probability)")
     res["balanced_expected_ratio"] = {f"{c}/{name[v]}": float(x) for (c, v), x in exp.items()}
     res["balanced_gate_ok"] = ok
+    res["balanced_assignments_all_in_band"] = frac
+
+    if a.ref_ab or a.ref_ba:
+        res["demo_compare"] = demo_compare(a, PA, PB, byA, byB, conds, name, rng)
 
     out = Path(a.out or Path(a.ba).parent / f"order_{Path(a.ba).stem}.json")
     with open(out, "w") as f:
