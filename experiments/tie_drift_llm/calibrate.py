@@ -255,6 +255,7 @@ def summarize(ds: dict, rows: list[dict], M: int, seed: int) -> dict:
         res["cue"] = dict(
             by_cue=by_cue,
             demo_labels="".join(task.demo_giveup_labels(ds["fewshot"])) if ds.get("fewshot") else None,
+            query_order="/".join(sorted({task.listing_order(p) for p in prompts})),
             cue_follow=q, cue_follow_ci95=q_ci, cue_effect=effect, cue_effect_ci95=effect_ci,
             giveup_by_cue=giveup_by_cue,
             b_minus_exception=diff,
@@ -346,7 +347,8 @@ def report(res: dict, conds: list[str]) -> None:
         if bc:
             cv = res.get("spec", {}).get("cue_values") or task.LABELS
             f = lambda x: "-" if x is None else f"{x:.3f}"  # noqa: E731
-            print(f"  [INFO] within cue {cv[0]} / {cv[1]} (give-up demo labels {cu.get('demo_labels')}): "
+            print(f"  [INFO] within cue {cv[0]} / {cv[1]} (give-up demo labels {cu.get('demo_labels')}, "
+                  f"query order {cu.get('query_order', 'AB')}): "
                   f"a {f(bc['A']['a'])} / {f(bc['B']['a'])}, listed give-up {f(bc['A']['giveup_listed'])} / "
                   f"{f(bc['B']['giveup_listed'])}, (B) share {f(bc['A']['pick_B'])} / {f(bc['B']['pick_B'])}; b "
                   + ", ".join(f"{c} {bc['A']['b'][c]:.3f} / {bc['B']['b'][c]:.3f}" for c in conds))

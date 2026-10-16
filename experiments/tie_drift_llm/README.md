@@ -162,7 +162,9 @@ Gate between steps:
   `eval_samples.jsonl.gz` (every eval sample with its category and chosen code) and
   `ckpt_step<N>/` (with `--save-steps`).
 * `analyze.py`: the state at `--at-step` (primary: hack share, gold, held-out gold,
-  held-out and flip `hit`, runs above 0.5, paired gap per contrast), hack share at
+  held-out and flip `hit`, runs above 0.5, paired gap per contrast; cue design: per-cell
+  give-ups and `hit` with intervals over questions, flip sensitivity, order invariance
+  where both listing orders occur, `--trajectory`, `--pc2`), hack share at
   KL targets 0.25/0.5/1 with a `[SUPPORT]/[KILL]/[INCOMPLETE]` verdict (secondary),
   `hack_share_vs_step.png`, `hack_share_vs_kl.png` (GRPO solid, BoN dotted) and, in
   the K design, `hack_share_vs_K.png`.
@@ -201,6 +203,8 @@ Cheaper first pass: `ARMS="adam sgd" SEEDS="0 1"` (8 runs).
   `wrong`), `eval_metrics`, `selftest`.
 * `llm.py`: model loading, exact sampling, sequence log-probs.
 * `calibrate.py`, `match.py` (cue design: match exception's pi0 hack mass to a rule arm), `warmstart.py`, `probe.py`, `grpo.py`, `analyze.py`, `run_sweep.sh`.
+* `order_effect.py` (cue design): paired listing-order diagnostic from two calibrations of
+  one dataset in both query orders (`task.py variant --order BA`).
 
 ## Status (2026-10-12)
 
@@ -940,6 +944,56 @@ python $T/grpo.py --dataset $D/c2ndx_s1.json --cond rule --reward hack_only --se
   2>&1 | tee $D/posctl_c2ndx_s1.log
 ```
 
+**Positive control result (2026-10-16): fails the pre-fixed criterion.** The run learned
+substantial cue-dependent behaviour, but did not reach the prespecified accuracy and
+generalization criteria within 30 steps. At step 30, held-out `hit` is 74/128 = 0.58 on
+red and 128/128 = 1.00 on blue. Flip sensitivity is +0.48 [+0.38, +0.57] (64 pairs,
+bootstrap over pairs). The criterion was 0.8 on both cue values and +0.6. The 128 red
+held-out responses come from 32 questions. Resampling questions gives [0.45, 0.70] for
+red, wider than the response-level Wilson interval [0.49, 0.66]. The verdict is the same
+either way. Give-ups do not limit the measurement: each cue value has at least 125 of
+128 from step 20. This is a capability diagnostic. Under `hack_only`, correct arithmetic
+earns nothing, so the loss of honest answers is expected and says nothing about drift
+under the tied reward.
+
+| eval step | 0 | 5 | 10 | 15 | 20 | 25 | 30 |
+|---|---|---|---|---|---|---|---|
+| eval KL (full eval) | 0 | 0.58 | 1.23 | 1.60 | 2.13 | 2.47 | 2.25 |
+| train give-up | 0.322 | 0.744 | 0.913 | 0.974 | 0.988 | 0.996 | 0.995 |
+| train gold | 0.256 | 0.048 | 0.004 | 0.003 | 0 | 0 | 0 |
+| held-out `hit` red / blue | 0.17 / 0.91 | 0.18 / 0.88 | 0.21 / 0.83 | 0.33 / 0.76 | 0.48 / 0.69 | 0.65 / 0.90 | 0.58 / 1.00 |
+| flip sensitivity | −0.04 | +0.01 | +0.00 | +0.02 | +0.06 | +0.46 | +0.48 |
+
+* *Order of learning.* First, giving up (0.32 → 0.91 by step 10, gold to 0.004), with no
+  cue dependence. Next, a cue-independent shift away from `(B)`. The held-out `(B)` share
+  among give-ups, averaged over the two cue values, goes 0.87 → 0.81 → 0.60 between steps
+  0, 10 and 20, while flip sensitivity stays at +0.06. Last, cue dependence, between
+  steps 20 and 25 at eval KL above 2, then flat to step 30. This separates learning to
+  give up from learning which code earns reward. Giving up more is rewarded in every
+  arm. The cue-dependent choice is the only component that tells rule from exception,
+  and it moved last.
+* *Prompt-specific learning (suggestive, not established).* At step 30, flip prompts
+  (train questions and codes with the cue flipped, whose parents were trained on the
+  other label) have red `hit` 45/128 = 0.35 [0.22, 0.48 over questions], against
+  held-out 0.58 [0.45, 0.70] and train 0.67. Blue is 0.92 against 1.00. That is
+  consistent with training on a parent pulling its flipped copy toward the parent's
+  answer, competing with the rule. But held-out and flip prompts are different
+  questions, and the intervals touch. Cue-flipped versions of held-out questions would
+  test it directly.
+* *Learning signal.* Zero-advantage groups, all passing or all failing, were 6-17 of
+  32 per step through step 24, then 21-31. At step 30, 31 of 32 groups had zero
+  advantage, so one group carried the reward signal. A high rollout pass rate can
+  coexist with little corrective signal. Only the overall count was logged, so the
+  split by cue and by all-pass / all-fail is unknown for this run (`grpo.py` now logs it).
+* *The policy was still moving.* Minibatch KL (on each step's training rollouts) ran
+  1.7-3.4 over steps 20-30. The full-eval KL above peaked at 2.47; the two are different
+  estimates and are not mixed. The raw gradient norm was 754 at step 28. A raw-norm spike
+  alone does not establish an oversized Adam update. The training batches at steps 29
+  and 30 (19 and 16 of 32 prompts red, reconstructed from the run's prompt order) passed
+  0.97 and 0.96, where the step-30 eval policy's per-prompt `hit` predicts 0.84 and 0.89.
+  So step 30 is not a plateau. The verdict stands as fixed: not shown at this budget,
+  not shown to be unlearnable.
+
 **Development stage 3: controlled demo-label comparison** (design and reading fixed
 before the runs). Bases `cue2g_s0` (demo labels `AA`) and `cue2g_s1` (`BB`), each rendered
 as `c2ndx` with balanced give-up demo labels `AB` and `BA`. `variant --demo-labels` keeps
@@ -969,24 +1023,251 @@ done; done
   across constructions. Otherwise, report and decide again. Stage 3 is a comparison, not
   a selection: no construction from it goes to training.
 
+**Development stage 3 results (2026-10-16, `--seed 1`, 128 train prompts × 32).** In both
+bases the demonstrated labels shift the position preference strongly, in the direction
+of the label added. Balanced labels do not neutralise the preference, and no balanced
+variant brings the within-cue ratios into 0.7-1.3. Balanced labels are not adopted;
+decide again.
+
+| base | labels | relabelled demo | listed `(B)` share (95% CI) | red / blue | rule / exception, red / blue | anti / exception, red / blue | `a` | listed give-up |
+|---|---|---|---|---|---|---|---|---|
+| `s0` | `AA` (`c2ndx_s0`) | none | 0.44 [0.38, 0.50] | 0.43 / 0.46 | 1.16 / 0.97 | 0.85 / 1.15 | 0.222 | 0.354 |
+| `s0` | `AB` | last | 0.79 [0.75, 0.84] | 0.79 / 0.80 | 0.44 / 1.63 | 1.66 / 0.42 | 0.217 | 0.392 |
+| `s0` | `BA` | first | 0.66 [0.60, 0.71] | 0.65 / 0.67 | 0.74 / 1.49 | 1.34 / 0.74 | 0.213 | 0.392 |
+| `s1` | `BB` (`c2ndx_s1`) | none | 0.89 [0.86, 0.91] | 0.89 / 0.89 | 0.22 / 1.62 | 1.70 / 0.21 | 0.254 | 0.329 |
+| `s1` | `AB` | first | 0.73 [0.68, 0.78] | 0.73 / 0.73 | 0.53 / 1.19 | 1.45 / 0.44 | 0.272 | 0.299 |
+| `s1` | `BA` | last | 0.78 [0.74, 0.83] | 0.80 / 0.77 | 0.39 / 1.30 | 1.55 / 0.40 | 0.260 | 0.310 |
+
+Paired changes in the pooled `(B)` share (same prompts, resampled jointly): `s0` `AB` −
+`AA` +0.35 [+0.31, +0.39], `BA` − `AA` +0.22 [+0.19, +0.25], `AB` − `BA` +0.14 [+0.11,
++0.17]; `s1` `AB` − `BB` −0.15 [−0.19, −0.12], `BA` − `BB` −0.10 [−0.13, −0.08], `AB` − `BA`
+−0.05 [−0.08, −0.03].
+
+* *Labels (reading as fixed).* On `s1` the balanced variants move the `(B)` share toward
+  0.5, beyond the `BB` interval. On `s0` they move it above 0.44, as the parenthesis
+  required, but past 0.5 to 0.66 and 0.79, further from 0.5 than `AA`. So the literal
+  "toward 0.5" holds on `s1` only. Both bases agree on a different description. Each
+  demonstrated `(A)` answer lowers the `(B)` share and each `(B)` answer raises it. With
+  one demo of each, pi0 still picks `(B)` 0.66-0.79 of the time. The demonstrated labels
+  shift the preference but do not set it alone. Under this format a residual preference
+  for `(B)` / the second-listed option remains. The variants are a valid ablation (checked:
+  identical queries and demo answers; only the relabelled demo's listing changes), so the
+  shift is caused by the demonstration manipulation. But the manipulation moves the
+  answered word's letter and ordinal position together. So the residual does not
+  identify a preference for the letter `B`. It could be the position, the letter, or
+  their interaction with demo content. Both kinds of selection bias, option order and
+  option symbol, are documented for LLMs (Wei et al. 2024, Findings of ACL, arXiv
+  2406.03009; Zheng et al., ICLR 2024). `AA` landed near 0.5 (`s0` 0.44, and `s2` 0.52 in
+  stage 2) because two `(A)` demos offset the residual preference. The demo-label sweep
+  stops here.
+* *Recency.* `AB` and `BA` differ in both bases, but not in a consistent direction.
+  Relabelling the last demo moved the share more than relabelling the first on `s0`
+  (+0.35 vs +0.22), and less on `s1` (−0.10 vs −0.15). With two bases, a demo's position
+  is confounded with its content. The data do not support a simple recency rule.
+* *Recipe.* Every balanced variant fails the band: rule on red 0.39-0.74, anti on blue
+  0.40-0.74. The pooled gates again miss this. `c2ndxBA_s1` passes all of them (ratio
+  0.83, gap 20%). The others warn only on arm ratio (`AB_s0` 1.00, `BA_s0` 1.07) or on the
+  gap (`AB_s1` 25%).
+* *Why the band fails.* Exception labels are balanced within each cue value. So
+  within-cue rule / exception ≈ 2(1 − s) on red and 2s on blue, where s is the `(B)`
+  share; deviations come from how the exception labels fall on prompts (`AB_s0`: s 0.79
+  predicts 0.42 / 1.58, observed 0.44 / 1.63). The 0.7-1.3 band therefore needs s in
+  0.35-0.65 on both cue values. For a position-defined rule against a balanced exception,
+  within-cue comparability reduces to one number, the position preference. Of the six
+  label patterns, only `AA` meets it.
+* *Cue effect, paired red − blue on flip pairs (64 each; `AB_s0`, `BA_s0`, `AB_s1`,
+  `BA_s1`).* All give-ups +0.059, +0.041, +0.045, +0.050; honest −0.042, −0.026, −0.033,
+  −0.047. Every interval excludes 0. The effect survives the label changes. These reuse the
+  questions of `s0` and `s1`, so they are not new constructions.
+* *Formatting.* Unlisted 0.045 / 0.062 / 0.029 / 0.035. The top single code is at most
+  0.6% (`noodle`, 19 and 25 responses in the `s0` variants). No placeholder copies.
+
+**Fourth review (2026-10-16, after the positive control and stage 3).** Each point was
+checked against the raw evaluations, training logs and the four calibrations, and all
+are adopted:
+
+* The positive-control wording above: substantial cue-dependent behaviour, criteria not
+  met. It is a capability diagnostic. Generalization across questions is reported with
+  intervals over questions. The memorization claim is qualified. Eval and minibatch KL
+  are kept apart. A raw gradient-norm spike is not evidence of an oversized Adam update.
+* Stage 3 is a valid ablation, but it moves letter and position together. Softened to "a
+  residual preference for `(B)` / the second-listed option under this format". The
+  demo-label sweep stops.
+* The next manipulation is listing order, paired (development stage 4, below). Two
+  qualifications. First, counterbalancing positions balances how often accepted codes
+  occupy each position. It does not guarantee matched mass, because give-up rates and
+  preferences vary with question and order. So within-cue `b` is checked empirically.
+  Second, reversing the order changes the learning task. The rule becomes "cue → letter,
+  then find that letter's word", and the first positive control does not establish that.
+* Positive control 2: a fixed 60-step endpoint, checkpoints, and one independent
+  training-seed repeat. `hit` in all four cue × order cells. Zero-advantage groups by cue
+  and order. The trajectory is shown, and no checkpoint is selected.
+* Reruns get their own output directory. `grpo.py` deleted the logs of an existing run at
+  the same path, and the automatic name has no step budget. It now refuses unless
+  `--out` is new or `--overwrite` is given.
+* Main design (below): the primary outcome is the continuous rule − exception difference
+  in within-tie drift, with gold accuracy and the mechanism checks. The "≥ 2 of 3 runs
+  above 0.5" rule is superseded; it discards information and exaggerates near-threshold
+  differences. Difficulty is crossed within each construction, not assigned to
+  different constructions.
+* Code: `task.py variant --order BA`; `order_effect.py`; `grpo.py` logs zero-advantage
+  groups per cue (and cue/order) as [groups, all pass, all fail] in `train.jsonl`
+  (`zero_adv_by`), and adds `--overwrite`; `analyze.py` gives intervals over questions per
+  (split, cue[, order]) cell, and `--trajectory` prints every eval.
+
+**Development stage 4: paired listing-order diagnostic** (design, reading and gate fixed
+before the runs). Bases `c2ndx_s0` (demos `AA`) and `c2ndx_s1` (`BB`), already calibrated
+with `(A)` listed first (`--seed 1`). `variant --order BA` lists `(B)` first in every query:
+`(B) \boxed{GIVE UP: w2} or (A) \boxed{GIVE UP: w1}`. Each word keeps its label.
+Questions, codes, cues, exception labels and demos are unchanged; the demos keep `(A)`
+first. Every question is then observed in both orders, and the 64 flip-pair questions in
+all four cue × order renderings. Full calibrations, `--seed 1`, about 50 min each.
+
+```bash
+D=experiments/tie_drift_llm/data; T=experiments/tie_drift_llm
+for S in 0 1; do
+  python $T/task.py variant --base $D/c2ndx_s$S.json --out $D/c2ndxBF_s$S.json --order BA
+  python $T/calibrate.py --dataset $D/c2ndxBF_s$S.json --seed 1 2>&1 | tee $D/calib_c2ndxBF_s$S.log
+  python $T/order_effect.py --ab $D/c2ndx_s$S.json --ba $D/c2ndxBF_s$S.json 2>&1 | tee $D/order_c2ndxBF_s$S.log
+done
+```
+
+* *Measures* (`order_effect.py`; intervals from resampling questions):
+  * the `(B)` share and the second-position share in each order;
+  * a logit decomposition, logit P(B) = β_label + β_pos · (+1 if `(B)` is second, −1 if
+    first). β_pos > 0 prefers the second-listed code; β_label > 0 prefers the
+    `(B)`-labelled one. The label-to-word binding is fixed, so the letter and the word
+    are not separated;
+  * BA − AB in listed and all give-ups, honest answers and `b` per arm, pooled and per cue;
+  * the four cells on flip pairs: the cue effect within each order, the order effect
+    within each cue, and their interaction;
+  * held-out questions as a replicate.
+* *Reading* (descriptive): a position effect if β_pos's interval excludes 0, and a label
+  effect if β_label's does. Both may hold. Read each base separately: the bases
+  demonstrate opposite labels (`AA` vs `BB`), and the demos keep `(A)` first.
+* *Gate* (adopt order counterbalancing): on both bases, the expected within-cue ratio to
+  exception of an order-balanced build is in 0.7-1.3 for rule and anti on both cue
+  values. The balanced build lists `(B)` first on half of every (cue, exception label)
+  cell; its expected `b` uses, per question, the mean of its two orders. The spread over
+  random balanced assignments is printed too. A single build can land outside the band
+  by assignment alone, so the build's own fresh calibration is the confirmation.
+  * If the gate passes: build the order-balanced construction, with held-out and flip
+    prompts in all four cue × order renderings (same words and letter-to-word binding in
+    every rendering of a question; the flip prompt in its parent's order is the
+    directional pair). Confirm the within-cue ratios on a fresh calibration, fix the
+    positive control 2 criterion, then run positive control 2.
+  * If it fails on either base: report and decide again. The remaining options are a
+    declared demo-label pattern (`AA`) or a cue rule not tied to the listing.
+* No construction from stage 4 goes to training.
+
+**Positive control 2** (criterion agreed 2026-10-16, fifth review below; frozen once the
+construction is specified, before either training run). Rule arm, `--reward hack_only`,
+fixed endpoint at step 60, `--save-steps 30 60`, `--final-eval-samples 32` (the
+intermediate evals keep 8 samples per train prompt and 4 per held-out / flip prompt),
+training seeds 0 and 1, each with its own `--out`. Report the trajectory (`analyze.py
+--trajectory`) and select no checkpoint. **Each seed passes or fails separately**, on
+point estimates at step 60 (`analyze.py --at-step 60 --pc2`):
+
+* held-out `hit` is at least 0.8 in each of the four cue × order cells, each with at
+  least 10 give-ups;
+* the directional cue-flip criterion is kept: on train-parent / flip pairs (same question,
+  words and listing order; only the cue differs), paired cue sensitivity is at least
+  +0.6 within each listing order. Order invariance does not replace it;
+* order invariance on held-out questions, for each cue value c:
+
+  I_c = (1/N) Σ_i | P̂_i(B | c, AB order, give-up) − P̂_i(B | c, BA order, give-up) | ≤ 0.2.
+
+  Each pair keeps the question, the words and the letter-to-word binding; only the
+  listing order differs. The absolute value is taken per question before averaging, so
+  opposite order effects on different questions cannot cancel. An aggregate signed
+  difference would cancel them, and it would also be largely redundant with the four
+  `hit` thresholds. 0.2 is a declared engineering tolerance, not a statistically
+  established boundary. It is not tightened for this feasibility stage.
+
+A learned letter rule changes its word when the cue changes and keeps it when only the
+order changes.
+
+*Why 32 samples at the final eval.* Sampling noise biases I_c upward. For two
+order-invariant probabilities of 0.8, the expected observed |difference| is 0.209 at 4
+samples per rendering and 0.079 at 32 (exact binomial). In 20 synthetic replicates of 32
+order-invariant pairs, `analyze.py` gave a mean of 0.211 (range 0.14-0.27) at 4 samples and
+0.080 (range 0.06-0.10) at 32. At 4 samples a perfectly order-invariant policy at `hit`
+0.8 would fail the 0.2 tolerance about half the time. `P̂_i` is a share of give-ups, so its
+effective sample size is the give-up count; it is printed.
+
+*Reported beside the gates, not gates:*
+
+* prompt-bootstrap intervals for every `hit` cell, both flip sensitivities and each I_c;
+* give-up coverage per cell (listed give-ups / samples). `hit` is a share of give-ups, so
+  a cell can pass `hit` with few give-ups;
+* for I_c: the pairs with a give-up in both orders (`n_covered` of N), give-ups per
+  rendering (min and mean), the signed mean, and a worst case that counts pairs without
+  give-ups at 1. Pairs without give-ups are never dropped silently, and `--pc2` prints the
+  coverage next to a PASS.
+
+Track zero-advantage groups by cue and order. About 2.3 h per run for 60 steps on the
+current instance, plus the final eval. At 32 samples per prompt it costs 4 times a train
+eval and 8 times a held-out / flip eval: about 30 min at give-up length if each split has
+128 prompts (about 0.13 s per sample, measured at step 30 of the first positive
+control), up to about 75 min at pi0's output length.
+
+**Fifth review (2026-10-16, on the positive control 2 criterion).** Every point was
+checked and is adopted:
+
+* Step 60, checkpoints, seeds 0 and 1, `hit` ≥ 0.8 in all four cue × order cells; each seed
+  passes separately.
+* The 0.2 order threshold is kept and defined per question and per cue (I_c above), as a
+  declared engineering tolerance.
+* 32 samples per rendering at the final evaluation. The noise figures (0.209 at 4, 0.079
+  at 32) were recomputed exactly and by simulation (above).
+* The directional cue-flip criterion on train-parent pairs is kept. The draft's "within
+  each listing order" form is kept, which is at least as strict as the pooled one.
+* Prompt-bootstrap intervals and give-up coverage are reported beside the point-estimate
+  gates. Pairs without give-ups are not omitted silently.
+* The criterion is frozen once the construction is specified, before either training run.
+* Code: `grpo.py --final-eval-samples N` (every split at the eval after the last step;
+  `eval.jsonl` records `samples` / `samples_other`). In `analyze.py`:
+  * `order_invariance` (I_c with coverage, signed mean, worst case and intervals, on
+    held-out and flip questions);
+  * flip sensitivity uses same-order pairs only, and is reported per listing order;
+  * `--pc2` prints the verdict per run. It fails a run whose last eval is not at
+    `--at-step` or used fewer than 32 samples per held-out prompt.
+* Checks:
+  * on the first positive control, `analyze.py` reproduces the earlier numbers;
+  * on a synthetic order-balanced run, the verdict is PASS for a perfect rule. It is FAIL
+    for opposite per-question order effects that pass all four `hit` cells (I_A 0.29,
+    signed +0.06). It is PASS with the coverage shown when 10 of 32 pairs have no
+    give-ups (worst case 0.31);
+  * a 1-step CPU smoke of `grpo.py` used 3 samples per prompt at the final eval only.
+
 **Planned main design** (direction adopted; regimes, gates and predictions to be fixed
-after the positive control and stage 3). Cross rule vs exception with two predefined
-difficulty regimes, with identical prompts and pi0 across reward conditions within
-each regime. Measure within-tie drift (observed minus score-only share) and exploit
-transfer (per-cue `hit`, flip sensitivity). The question becomes where transfer
-changes the outcome, rather than requiring every construction to sit on one side of
-an arbitrary `b/a` threshold. Difficulty changes more than `a` (give-up rate, lengths,
+after stage 4 and positive control 2). Cross rule vs exception with two predefined
+difficulty regimes *within each construction*: the same demos and code words, with only
+question difficulty varied, so that difficulty is not confounded with demos and words.
+Prompts and pi0 are identical across reward conditions within each regime. The primary
+outcome is the continuous rule − exception difference in within-tie drift (observed
+minus score-only hack share on the train prompts) at the declared endpoint, paired by
+training seed. It comes with gold accuracy and the mechanism checks: per-cell `hit`, flip
+sensitivity, and give-up rate per arm. The exception arm can also share a generic
+give-up strategy, so the contribution is the additional effect of a transferable
+code-selection rule. The question becomes where transfer changes the outcome, rather
+than requiring every construction to sit on one side of an arbitrary `b/a` threshold. Difficulty changes more than `a` (give-up rate, lengths,
 error types), so the interaction is read with that in mind. Within-cue comparability of
 the arms is to replace the pooled give-up-by-cue gate as the comparability check.
 
-**Compute.** About 57 s per step, plus about 220 s per eval (train 1024 samples; held-out
-and flip 512) every 5 steps, gives about 55 min per run. 12 runs (2 constructions × 2
-arms × 3 seeds) take about 11 GPU-hours. A full calibration (256 prompts × 32) takes about
-45 min, a smoke (32 × 16) about 3 min, and the probe about 5.5 min per condition.
+**Compute.** The main design is 2 difficulties × 2 constructions × 2 arms × 3 seeds = 24
+runs at 60 steps. The earlier per-step figures (57 s per step, plus 220 s per eval every
+5 steps) give about 1.75 h per run and 42 GPU-hours. The positive control measured more
+on the current instance: 89 min for 30 steps. At pi0's output length (about 57 tokens) a
+step took about 140 s and a full eval about 650 s; as outputs shortened, these fell to
+50-70 s and 200 s. Mixed-reward runs keep longer outputs, so budget up to about 4.5 h per
+run, about 110 GPU-hours, before controls. A full calibration (256 prompts × 32) takes
+about 50 min, a smoke (32 × 16) about 3 min, and the probe about 5.5 min per condition.
 
-The hypotheses and decision rule below are a draft for the single-regime pilot. They will
-be rewritten for the planned main design (difficulty × rule vs exception) and frozen
-before it runs. The `giveup_adv` caveat in the third review applies to the exception
+The hypotheses and decision rule below are a draft for the single-regime pilot, kept
+for the record. They are superseded: the fourth review made the primary outcome the
+continuous rule − exception drift difference. They will be rewritten for the planned main
+design (difficulty × rule vs exception) and frozen before it runs. The `giveup_adv` caveat in the third review applies to the exception
 predictions.
 
 **Hypotheses** (per construction; empirical, motivated by the threshold theorem but not

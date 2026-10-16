@@ -80,6 +80,8 @@ def parse_args():
                     help="calibrate.py summary.json; enables the within-tie KL split (default: next to dataset)")
     ap.add_argument("--model", default="Qwen/Qwen2.5-0.5B-Instruct")
     ap.add_argument("--out", default=None, help="run dir (default: <dataset dir>/runs/<auto name>)")
+    ap.add_argument("--overwrite", action="store_true",
+                    help="replace the logs of an existing run in the same dir (the auto name has no step budget)")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--device", default=None)
     # sampling
@@ -120,6 +122,10 @@ def parse_args():
     ap.add_argument("--eval-samples", type=int, default=8, help="samples per train prompt at each eval")
     ap.add_argument("--eval-samples-other", type=int, default=4,
                     help="samples per held-out / flip prompt at each eval")
+    ap.add_argument("--final-eval-samples", type=int, default=0,
+                    help="samples per prompt in every split at the eval after the last step (0 = the "
+                         "counts above). Paired statistics such as mean |P_AB - P_BA| are biased upward "
+                         "by sampling noise: 0.21 at 4 samples, 0.08 at 32, for two equal rates of 0.8")
     ap.add_argument("--save-steps", type=int, nargs="*", default=[],
                     help="save the policy (bf16 on GPU) after these steps; -1 = the last step")
     ap.add_argument("--kl-stop", type=float, default=4.0, help="stop once eval KL exceeds this")
@@ -185,6 +191,8 @@ def main() -> None:
         print(f"note: no calibration at {calib_path}; within-tie KL split disabled")
 
     out = Path(a.out or Path(a.dataset).parent / "runs" / Path(a.dataset).stem / run_name(a))
+    if any((out / f).exists() for f in ("train.jsonl", "eval.jsonl")) and not a.overwrite:
+        sys.exit(f"{out} already holds a run; pass --out <new dir> (or --overwrite to replace it)")
     out.mkdir(parents=True, exist_ok=True)
     for f in ("train.jsonl", "eval.jsonl", "samples.jsonl", "eval_samples.jsonl.gz"):
         (out / f).unlink(missing_ok=True)
@@ -253,7 +261,10 @@ def main() -> None:
     # ---------------------------------------------------------------- eval
     def evaluate(step: int) -> dict:
         t = llm.Timer()
-        smp = llm.generate(sampler, tok, pids, a.eval_samples, max_new_tokens=a.max_new_tokens,
+        final = step == a.steps and a.final_eval_samples > 0
+        S = a.final_eval_samples if final else a.eval_samples
+        S_other = a.final_eval_samples if final else a.eval_samples_other
+        smp = llm.generate(sampler, tok, pids, S, max_new_tokens=a.max_new_tokens,
                            seed=10_000_019 * (a.seed + 1) + step, batch_size=a.gen_batch, device=device)
         P = [pids[s.prompt_idx] for s in smp]
         C = [s.completion_ids for s in smp]
@@ -263,12 +274,12 @@ def main() -> None:
         pi = np.array([s.prompt_idx for s in smp])
         cat_arr = np.array(cats)
         cnt = {c: np.bincount(pi[cat_arr == c], minlength=N) for c in task.CATEGORIES}
-        S = a.eval_samples
         kl_i = np.bincount(pi, weights=lp - lr_, minlength=N) / S
         hon, hk = cnt["honest"].sum(), cnt["hack"].sum()
         pass_i = (cnt["honest"] + cnt["hack"]) / S
         rec = dict(
-            step=step, kl=float(kl_i.mean()), kl_se=float((lp - lr_).std() / math.sqrt(len(smp))),
+            step=step, samples=S, samples_other=S_other,
+            kl=float(kl_i.mean()), kl_se=float((lp - lr_).std() / math.sqrt(len(smp))),
             pass_rate=float(pass_i.mean()),
             hack_share=float(hk / max(hon + hk, 1)),
             gold=float(np.mean([task.gold_reward(c, a.hack_gold) for c in cats])),
@@ -285,7 +296,7 @@ def main() -> None:
         log_samples(step, "train", smp, prompts, cats)
         rec["splits"] = {}
         for j, (name, plist) in enumerate(splits.items()):
-            so = llm.generate(sampler, tok, split_pids[name], a.eval_samples_other,
+            so = llm.generate(sampler, tok, split_pids[name], S_other,
                               max_new_tokens=a.max_new_tokens, seed=10_000_019 * (a.seed + 1) + step + 7919 * (j + 1),
                               batch_size=a.gen_batch, device=device)
             ms = task.eval_metrics([s.text for s in so], [plist[s.prompt_idx] for s in so], a.cond, a.hack_gold)
@@ -312,7 +323,8 @@ def main() -> None:
         print(f"  [eval {step:4d}] KL {rec['kl']:.3f}±{rec['kl_se']:.3f}  pass {rec['pass_rate']:.3f}  "
               f"hack share {rec['hack_share']:.3f}{sc}  honest {rec['frac_honest']:.3f}  "
               f"hack {rec['frac_hack']:.3f}  invalid {rec['frac_code_invalid']:.3f}  gold {rec['gold']:.3f}  "
-              f"len {rec['mean_len']:.0f}  ({rec['eval_seconds']:.0f}s)", flush=True)
+              f"len {rec['mean_len']:.0f}  ({rec['eval_seconds']:.0f}s"
+              + (f", {S} samples per prompt)" if final else ")"), flush=True)
 
         def by_cue(ms):
             if "by_cue" not in ms:
@@ -417,18 +429,33 @@ def main() -> None:
 
         hon = sum(c == "honest" for c in cats)
         hk = sum(c == "hack" for c in cats)
+        # Groups with zero advantage carry no reward signal: all passed or all failed. Per
+        # cue value (and cue/order when the listing order varies), as [groups, all pass,
+        # all fail]: a high pass rate can coexist with no corrective signal anywhere.
+        zero_by = {}
+        if "cue" in prompts[0]:
+            for k in range(len(bidx)):
+                p = prompts[bidx[smp[k * a.group].prompt_idx]]
+                keys = [p["cue"]] + ([f"{p['cue']}/{task.listing_order(p)}"]
+                                     if any("order" in q for q in prompts) else [])
+                for key in keys:
+                    z = zero_by.setdefault(key, [0, 0, 0])
+                    z[0] += 1
+                    z[1] += bool(R[k].min() == 1)
+                    z[2] += bool(R[k].max() == 0)
         rec = dict(
             step=step, kl_batch=float(kl_seq.mean()), pass_rate=float(R.mean()),
             hack_share=hk / max(hon + hk, 1),
             **{f"frac_{c}": sum(x == c for x in cats) / n_seq for c in task.CATEGORIES},
-            zero_adv_groups=float(np.mean(R.std(1) == 0)), grad_norm=gnorm,
+            zero_adv_groups=float(np.mean(R.std(1) == 0)), zero_adv_by=zero_by, grad_norm=gnorm,
             lr=opt.param_groups[0]["lr"], mean_len=n_tok / n_seq,
             truncated=float(np.mean([s.truncated for s in smp])),
             clip_frac=clip_n / clip_d if clip_d else 0.0, t_gen=t_gen, t_step=t_gen + t(),
         )
         log("train.jsonl", rec)
         print(f"step {step:4d}  KL {rec['kl_batch']:.3f}  pass {rec['pass_rate']:.3f}  "
-              f"hack share {rec['hack_share']:.3f}  |g| {gnorm:.3g}  len {rec['mean_len']:.0f}  "
+              f"hack share {rec['hack_share']:.3f}  zero-adv {int(round(rec['zero_adv_groups'] * len(bidx)))}/{len(bidx)}  "
+              f"|g| {gnorm:.3g}  len {rec['mean_len']:.0f}  "
               f"{rec['t_step']:.1f}s", flush=True)
 
         if step % a.eval_every == 0 or step == a.steps:
