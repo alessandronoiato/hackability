@@ -269,10 +269,11 @@ def worked_product(x: int, y: int) -> str:
     return f"{chain}.\n\n\\boxed{{{x * y}}}"
 
 
-def _word_pairs(n_pairs: int, rng: random.Random, pair_tokens: str | None) -> list[tuple[str, str]]:
-    """Disjoint word pairs from CUE_WORDS; with a tokenizer, both words of a pair
-    have the same token count as they appear after "GIVE UP: "."""
-    words = CUE_WORDS[:]
+def _word_pairs(n_pairs: int | None, rng: random.Random, pair_tokens: str | None,
+                words: list[str] | None = None) -> list[tuple[str, str]]:
+    """Disjoint word pairs from CUE_WORDS (or `words`); with a tokenizer, both words of a
+    pair have the same token count as they appear after "GIVE UP: ". n_pairs None: all."""
+    words = list(CUE_WORDS if words is None else words)
     rng.shuffle(words)
     if pair_tokens is None:
         pairs = [(words[2 * j], words[2 * j + 1]) for j in range(len(words) // 2)]
@@ -285,6 +286,8 @@ def _word_pairs(n_pairs: int, rng: random.Random, pair_tokens: str | None) -> li
         pairs = [(ws[2 * j], ws[2 * j + 1]) for L in sorted(buckets) for ws in [buckets[L]]
                  for j in range(len(ws) // 2)]
         rng.shuffle(pairs)
+    if n_pairs is None:
+        return pairs
     if len(pairs) < n_pairs:
         raise ValueError(f"need {n_pairs} code pairs, pool gives {len(pairs)}")
     return pairs[:n_pairs]
@@ -478,7 +481,8 @@ def balanced_orders(prompts: list[dict], seed: int) -> set[int]:
 
 
 def cue_variant(base: dict, template: str | None = None, demo_cue: bool | None = None,
-                demo_labels: str | None = None, order: str | None = None, assign_seed: int = 0) -> dict:
+                demo_labels: str | None = None, order: str | None = None, assign_seed: int = 0,
+                train_renderings: str | None = None) -> dict:
     """The same cue dataset rendered with another template and/or without the demo cue lines.
 
     Questions, codes, cues, exception labels, demo questions, demo codes and demo answers
@@ -498,7 +502,18 @@ def cue_variant(base: dict, template: str | None = None, demo_cue: bool | None =
     their parent. A flip rendering is the directional cue flip of its parent when it has
     the other cue and the parent's order; the rest serve order invariance. The base must
     hold one rendering per question (not itself a balanced build).
+    train_renderings "all" (development stage 6b): every train question in all four cue x
+    order renderings, words and letter-to-word bindings kept, the accepted word following
+    the cue under rule and anti (the exception's code is kept). The base's train prompts
+    keep their ids; the other renderings follow, then the held-out renderings (all four per
+    question). The flip split is dropped: its questions are now trained in every rendering.
     """
+    if train_renderings is not None:
+        if train_renderings != "all":
+            raise ValueError(f"train_renderings must be 'all' (got {train_renderings!r})")
+        if order is not None:
+            raise ValueError("train_renderings 'all' trains every listing order; leave order unset")
+        return _crossed_variant(cue_variant(base, template, demo_cue, demo_labels))
     if order == "balanced":
         if base["spec"].get("query_order") == "balanced":
             raise ValueError("the base is already an order-balanced build")
@@ -564,13 +579,7 @@ def _balanced_variant(ds: dict, assign_seed: int) -> dict:
     first_b = balanced_orders(P, assign_seed)
 
     def rendering(p: dict, pid: int, cue: str, o: str) -> dict:
-        # Everything else is kept, including the exception's accepted code.
-        q = dict(p, id=pid, cue=cue, text=render_cue(template, p["x"], p["y"], cv[LABELS.index(cue)], p["codes"], o))
-        q["accept"] = dict(p["accept"], rule=p["codes"][cue], anti=p["codes"][OTHER[cue]])
-        q.pop("order", None)
-        if o != "AB":
-            q["order"] = o
-        return q
+        return _rendering(p, pid, cue, o, template, cv)
 
     prompts = [rendering(p, p["id"], p["cue"], "BA" if p["id"] in first_b else "AB") for p in train]
     for split in ("heldout", "flip"):
@@ -585,6 +594,48 @@ def _balanced_variant(ds: dict, assign_seed: int) -> dict:
                                       procedure="cells (cue, exception label) in lexicographic order; train ids "
                                                 "sorted, permuted, first half BA; one generator advanced across cells",
                                       train_ba=sorted(first_b)))
+    return dict(spec=spec, conditions=list(ds["conditions"]), prompts=prompts, fewshot=ds["fewshot"])
+
+
+def _rendering(p: dict, pid: int, cue: str, o: str, template: str, cue_values: list[str]) -> dict:
+    """p rendered with this cue and listing order. Rule and anti follow the cue; everything
+    else is kept, including the exception's accepted code."""
+    q = dict(p, id=pid, cue=cue, text=render_cue(template, p["x"], p["y"], cue_values[LABELS.index(cue)], p["codes"], o))
+    q["accept"] = dict(p["accept"], rule=p["codes"][cue], anti=p["codes"][OTHER[cue]])
+    q.pop("order", None)
+    if o != "AB":
+        q["order"] = o
+    return q
+
+
+def _crossed_variant(ds: dict) -> dict:
+    """Every train question in all four cue x order renderings (see cue_variant)."""
+    spec = dict(ds["spec"])
+    P = ds["prompts"]
+    if [p["id"] for p in P] != list(range(len(P))):
+        raise ValueError("prompt ids must be list positions")
+    train = [p for p in P if split_of(p) == "train"]
+    if P[:len(train)] != train:
+        raise ValueError("train prompts must come first")
+    if len({(p["x"], p["y"]) for p in train}) != len(train):
+        raise ValueError("the base must hold one rendering per train question")
+    template, cv = spec["template"], spec["cue_values"]
+    four = [(c, o) for c in LABELS for o in ("AB", "BA")]
+    prompts = [dict(_rendering(p, p["id"], p["cue"], listing_order(p), template, cv), question=p["id"])
+               for p in train]
+    for p in train:
+        for c, o in four:
+            if (c, o) != (p["cue"], listing_order(p)):
+                prompts.append(dict(_rendering(p, len(prompts), c, o, template, cv), question=p["id"]))
+    held = [p for p in P if split_of(p) == "heldout"]
+    if spec.get("eval_renderings") == "cue x order":
+        prompts += [dict(p, id=len(prompts) + j) for j, p in enumerate(held)]
+    else:
+        for p in held:
+            for c, o in four:
+                prompts.append(_rendering(p, len(prompts), c, o, template, cv))
+    spec.update(query_order="crossed", train_renderings="cue x order", eval_renderings="cue x order",
+                flip_split="dropped: its questions are trained in every rendering")
     return dict(spec=spec, conditions=list(ds["conditions"]), prompts=prompts, fewshot=ds["fewshot"])
 
 
@@ -849,6 +900,37 @@ def _selftest_cue() -> None:
         raise AssertionError("a balanced build must not be balanced again")
     except ValueError:
         pass
+    X = cue_variant(bal, train_renderings="all")
+    XP = X["prompts"]
+    xt = [q for q in XP if q["split"] == "train"]
+    assert [q["id"] for q in XP] == list(range(len(XP))) and XP[:len(xt)] == xt and X["fewshot"] == bal["fewshot"]
+    assert len(xt) == 4 * len(tr) and not any(q["split"] == "flip" for q in XP)
+    assert [{k: q[k] for k in q if k != "question"} for q in xt[:len(tr)]] == tr, "base train prompts keep id and text"
+    for q0 in tr:
+        four = [q for q in xt if q["question"] == q0["id"]]
+        assert sorted((q["cue"], listing_order(q)) for q in four) == [(c, o) for c in LABELS for o in ("AB", "BA")]
+        for q in four:
+            assert (q["x"], q["y"], q["codes"], q["exception_label"], q["accept"]["exception"]) == \
+                (q0["x"], q0["y"], q0["codes"], q0["exception_label"], q0["accept"]["exception"])
+            assert q["accept"]["rule"] == q["codes"][q["cue"]] and q["accept"]["anti"] == q["codes"][OTHER[q["cue"]]]
+            assert q["text"] == render_cue("explicit", q["x"], q["y"], v["spec"]["cue_values"][LABELS.index(q["cue"])],
+                                           q["codes"], listing_order(q))
+        # A cue-independent policy (a fixed word, letter or slot) gets exactly two of the four.
+        for lab in LABELS:
+            assert sum(q["accept"]["rule"] == q["codes"][lab] for q in four) == 2
+        for slot in (0, 1):
+            assert sum(q["accept"]["rule"] == q["codes"][listing_order(q)[slot]] for q in four) == 2
+    strip = lambda qs: [{k: x for k, x in q.items() if k != "id"} for q in qs]  # noqa: E731
+    assert strip(q for q in XP if q["split"] == "heldout") == strip(q for q in B if q["split"] == "heldout")
+    X2 = cue_variant(v, train_renderings="all")  # from the all-AB build: the same renderings, other ids
+    key = lambda q: (q["split"], q["x"], q["y"], q["cue"], listing_order(q), q["text"], json.dumps(q["accept"]))  # noqa: E731
+    assert sorted(map(key, X2["prompts"])) == sorted(map(key, XP))
+    for bad in (dict(base=X, train_renderings="all"), dict(base=bal, train_renderings="all", order="BA")):
+        try:
+            cue_variant(**bad)
+            raise AssertionError("a crossed build must not be crossed again, and takes no order")
+        except ValueError:
+            pass
     try:
         cue_variant(base, demo_labels="AB")
         raise AssertionError("demo_labels with demo cue lines must fail")
@@ -945,6 +1027,9 @@ def main() -> None:
                         "cue x order renderings")
     v.add_argument("--assign-seed", type=int, default=0,
                    help="--order balanced: seed of the order assignment (not the dataset or sampling seed)")
+    v.add_argument("--train-renderings", choices=("all",), default=None,
+                   help="all: every train question in all four cue x order renderings (words and bindings "
+                        "kept, accepted word follows the cue); held-out in all four; flip split dropped")
     sub.add_parser("selftest")
     args = ap.parse_args()
 
@@ -953,12 +1038,19 @@ def main() -> None:
         return
     if args.cmd == "variant":
         ds = cue_variant(load_dataset(args.base), args.template, False if args.no_demo_cue else None,
-                         args.demo_labels, args.order, args.assign_seed)
+                         args.demo_labels, args.order, args.assign_seed, args.train_renderings)
         with open(args.out, "w") as f:
             json.dump(ds, f, indent=1)
         print(f"wrote {args.out}: template {ds['spec']['template']}, demo cue {ds['spec']['demo_cue']}, "
               f"give-up demo labels {ds['spec']['demo_labels']} (base {ds['spec']['variant_of']['demo_labels']}), "
               f"query order {ds['spec']['query_order']}")
+        if args.train_renderings:
+            n = {s: sum(split_of(p) == s for p in ds["prompts"]) for s in ("train", "heldout", "flip")}
+            cells = {(c, o): 0 for c in LABELS for o in ("AB", "BA")}
+            for p in ds["prompts"][:n["train"]]:
+                cells[(p["cue"], listing_order(p))] += 1
+            print(f"crossed train renderings: {n}; train (cue, order): "
+                  + ", ".join(f"{c}/{o} {k}" for (c, o), k in cells.items()))
         if args.order == "balanced":
             n = {s: sum(split_of(p) == s for p in ds["prompts"]) for s in ("train", "heldout", "flip")}
             cells = {(c, e, o): 0 for c in LABELS for e in LABELS for o in ("AB", "BA")}

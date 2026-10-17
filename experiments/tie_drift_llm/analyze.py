@@ -29,8 +29,13 @@ memorized or always-(B)), averaged over pairs with give-ups in both (the flip pr
 the other cue and the parent's listing order). Builds with both listing orders add order
 invariance per cue value:
 I = mean over matched questions of |P_i(B | AB order) - P_i(B | BA order)| among
-give-ups, with its coverage (see order_invariance). --pc2 prints the positive
-control 2 verdict per run (README, "Positive control 2"). --trajectory
+give-ups, with its coverage (see order_invariance), and held-out cue sensitivity: the
+same paired (B)-share difference on held-out questions rendered under both cues, per
+listing order (see cue_sensitivity). --pc2 prints the positive control 2 verdict per run
+(README, "Positive control 2"); --pc3 the positive control 3 verdict (crossed training,
+README "Development stage 6"), where held-out cue sensitivity replaces the flip pairs.
+Under --reward hack_only honest answers earn 0, so `drift` is not within-tie drift;
+such runs are capability controls (a note is printed). --trajectory
 prints the same block at every eval, with the zero-advantage groups (all pass / all
 fail) per cue value summed over the training steps since the previous eval. Show the
 trajectory; the declared step (--at-step) stays the endpoint.
@@ -137,7 +142,7 @@ def wilson(k: int, n: int, z: float = 1.96) -> tuple[float, float]:
 def flip_sensitivity(run_dir: Path, step: int, prompts: list[dict], rng) -> dict | None:
     """Paired cue sensitivity over (flip prompt, train parent) pairs; see the docstring."""
     f = run_dir / "eval_samples.jsonl.gz"
-    if not f.exists():
+    if not f.exists() or not any(p.get("split") == "flip" for p in prompts):
         return None
     pick = defaultdict(list)
     with gzip.open(f, "rt") as fh:
@@ -176,6 +181,55 @@ def flip_sensitivity(run_dir: Path, step: int, prompts: list[dict], rng) -> dict
     out["by_order"] = {o: summ([d for d, o2 in zip(diffs, orders) if o2 == o],
                                sum(p.get("order", "AB") == o for p in flips))
                        for o in sorted({p.get("order", "AB") for p in flips})}
+    return out
+
+
+def cue_sensitivity(run_dir: Path, step: int, prompts: list[dict], split: str = "heldout") -> dict | None:
+    """Paired cue sensitivity on `split` questions rendered under both cue values.
+
+    A pair is the same question, words, letter-to-word binding and listing order, under
+    cue A and cue B. Its value is the (B) share of the cue-B rendering's listed-code
+    give-ups minus that of the cue-A rendering (+1 follows the cue, -1 the other label,
+    0 cue-independent), as for flip sensitivity, reported per listing order. On held-out
+    questions it measures cue use without training on the question. `worst` counts pairs
+    without give-ups in both renderings at -1. Bootstrap over pairs with its own fixed
+    generator, so adding it leaves the other intervals unchanged.
+    """
+    f = run_dir / "eval_samples.jsonl.gz"
+    if not f.exists():
+        return None
+    match = defaultdict(dict)
+    for p in prompts:
+        if p.get("split") == split:
+            match[(p["x"], p["y"], p["codes"]["A"], p["codes"]["B"], p.get("order", "AB"))][p["cue"]] = p["id"]
+    pairs = [(k[-1], v) for k, v in match.items() if len(v) == 2]
+    if not pairs:
+        return None
+    pick = defaultdict(list)
+    with gzip.open(f, "rt") as fh:
+        for line in fh:
+            r = json.loads(line)
+            if r["step"] == step and r["split"] == split and r.get("chosen") is not None:
+                pick[r["prompt_id"]].append(r["chosen"])
+    rng = np.random.default_rng(0)
+    diffs, orders = [], []
+    for o, v in pairs:
+        if pick[v["A"]] and pick[v["B"]]:
+            diffs.append(np.mean([c == "B" for c in pick[v["B"]]]) - np.mean([c == "B" for c in pick[v["A"]]]))
+            orders.append(o)
+
+    def summ(d, n_all):
+        out = dict(n_pairs=len(d), n_all=n_all, worst=float((sum(d) - (n_all - len(d))) / n_all))
+        if d:
+            d = np.array(d)
+            boot = d[rng.integers(0, len(d), size=(2000, len(d)))].mean(1)
+            out.update(sensitivity=float(d.mean()),
+                       ci95=[float(np.percentile(boot, 2.5)), float(np.percentile(boot, 97.5))])
+        return out
+
+    out = summ(diffs, len(pairs))
+    out["by_order"] = {o: summ([d for d, o2 in zip(diffs, orders) if o2 == o], sum(o2 == o for o2, _ in pairs))
+                       for o in sorted({o for o, _ in pairs})}
     return out
 
 
@@ -294,6 +348,12 @@ def mechanism_line(e: dict, cells: dict | None = None, rng=None) -> str:
                                for o, v in (fs.get("by_order") or {}).items() if len(fs["by_order"]) > 1))
     elif fs is not None:
         parts.append(f"flip sensitivity - (0/{fs['n_flip']} pairs with give-ups)")
+    cs = e.get("cue_sensitivity")
+    if cs:
+        parts.append("heldout cue sensitivity " + "; ".join(
+            f"{o} {v['sensitivity']:+.2f} [{v['ci95'][0]:+.2f},{v['ci95'][1]:+.2f}] ({v['n_pairs']}/{v['n_all']} pairs, "
+            f"worst {v['worst']:+.2f})" if v.get("n_pairs") else f"{o} - (0/{v['n_all']} pairs)"
+            for o, v in cs["by_order"].items()))
     for sp, oi in (e.get("order_invariance") or {}).items():
         out = []
         for cue, v in (oi or {}).items():
@@ -313,6 +373,49 @@ def fmt(x) -> str:
     return "  -  " if x is None or (isinstance(x, float) and np.isnan(x)) else f"{x:.2f}"
 
 
+def pc_verdict(e: dict, cells: dict, S: int, sens: dict | None, sens_name: str) -> str:
+    """PASS / NOT DEMONSTRATED / FAIL for positive controls 2 and 3 (README), one run.
+
+    Both: the last eval at step S with 32 samples per held-out prompt; held-out hit >= 0.8
+    in each cue x order cell (>= 10 give-ups); I_c <= 0.2 per cue value. sens: the
+    directional cue criterion, >= +0.6 within each listing order (train-parent / flip pairs
+    for PC2, held-out pairs for PC3). Missing pairs count at |diff| 1 for I and -1 for the
+    cue criterion; NOT DEMONSTRATED = the measured pairs pass but the missing ones could fail.
+    """
+    fails, undem = [], []
+    if e["step"] != S:
+        fails.append(f"last eval at step {e['step']}, not {S}")
+    if (e["eval_samples"][1] or 0) < 32:
+        fails.append(f"{e['eval_samples'][1]} samples per held-out prompt, not 32")
+    for cell in ("A/AB", "A/BA", "B/AB", "B/BA"):
+        g, h = (sum(v[k] for v in cells.get(cell, {}).values()) for k in (1, 2))
+        if g < 10 or h / g < 0.8:
+            fails.append(f"held-out hit {cell} {h}/{g}")
+    oi = (e.get("order_invariance") or {}).get("heldout") or {}
+    for cue in ("A", "B"):
+        v = oi.get(cue, {})
+        msg = (f"I_{cue} {fmt(v.get('I')).strip()} ({v.get('n_covered', 0)}/{v.get('n_pairs', 0)} "
+               f"pairs, worst case {fmt(v.get('worst')).strip()})")
+        if not v.get("n_pairs") or (v.get("I") is not None and v["I"] > 0.2):
+            fails.append(msg)
+        elif v["worst"] > 0.2:
+            undem.append(msg)
+    for o in ("AB", "BA"):
+        v = ((sens or {}).get("by_order") or {}).get(o, {})
+        n_all = v.get("n_flip", v.get("n_all", 0))
+        msg = (f"{sens_name} {o} {fmt(v.get('sensitivity')).strip()} ({v.get('n_pairs', 0)}/"
+               f"{n_all} pairs, worst case {fmt(v.get('worst')).strip()})")
+        if not n_all or (v.get("sensitivity") is not None and v["sensitivity"] < 0.6):
+            fails.append(msg)
+        elif v["worst"] < 0.6:
+            undem.append(msg)
+    cov = "; ".join(f"I_{cue} over {v['n_covered']}/{v['n_pairs']} pairs (worst case "
+                    f"{fmt(v.get('worst')).strip()})" for cue, v in oi.items() if v["n_covered"] < v["n_pairs"])
+    verdict = ("[FAIL] " + "; ".join(fails + undem) if fails
+               else "[NOT DEMONSTRATED] " + "; ".join(undem) if undem else "[PASS]")
+    return verdict + (f"  [coverage: {cov}]" if cov and not undem else "")
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--dataset", required=True)
@@ -325,6 +428,8 @@ def main() -> None:
                     help="cue design: the mechanism block at every eval, with zero-advantage groups by cue")
     ap.add_argument("--pc2", action="store_true",
                     help="positive control 2 verdict per run at --at-step (criterion in the README)")
+    ap.add_argument("--pc3", action="store_true",
+                    help="positive control 3 verdict (crossed training; held-out cue sensitivity replaces flip pairs)")
     args = ap.parse_args()
 
     dsp = Path(args.dataset)
@@ -368,6 +473,7 @@ def main() -> None:
                 for s, (rec, _) in st.items():
                     ends[c][s]["flip_sensitivity"] = flip_sensitivity(by[c][s]["dir"], rec["step"], ds_prompts, rng)
                     ends[c][s]["order_invariance"] = order_inv(by[c][s]["dir"], rec["step"])
+                    ends[c][s]["cue_sensitivity"] = cue_sensitivity(by[c][s]["dir"], rec["step"], ds_prompts)
                     cfg = by[c][s]["cfg"]  # runs before --final-eval-samples: the config's counts
                     ends[c][s]["eval_samples"] = [rec.get("samples", cfg.get("eval_samples")),
                                                   rec.get("samples_other", cfg.get("eval_samples_other"))]
@@ -386,53 +492,33 @@ def main() -> None:
             n_hi = sum(ends[c][s]["hack_share"] > 0.5 for s in seeds)
             star = "*" if early_any[c] else " "
             print(f"  {c:>9} {','.join(map(str, seeds)):>7}{star}  " + "  ".join(cells) + f"   {n_hi}/{len(seeds)}")
-        if any("by_cue" in e or e.get("flip_sensitivity") for v in ends.values() for e in v.values()):
+        hack_only = any(r["cfg"].get("reward") == "hack_only" for v in by.values() for r in v.values())
+        if hack_only:
+            print("  [note] reward hack_only: honest answers earn 0, so there is no tie, and hack_share_score / "
+                  "drift are not within-tie drift. These runs are capability controls, not evidence for the "
+                  "tie-drift claim.")
+        if any("by_cue" in e or e.get("flip_sensitivity") or e.get("cue_sensitivity")
+               for v in ends.values() for e in v.values()):
             print(f"  mechanism at step {S} (listed give-ups; hit = accepted code; 95% CI over prompts):")
             for c in ends:
                 for s_ in sorted(ends[c]):
                     cells = eval_cells(by[c][s_]["dir"], ds_prompts).get(ends[c][s_]["step"])
                     print(f"    {c} s{s_}: {mechanism_line(ends[c][s_], cells, rng)}")
-        if args.pc2:
-            print(f"  positive control 2 criterion at step {S}, each seed separately, on point estimates "
+        for flag, n_pc, label, key in ((args.pc2, 2, "flip sensitivity", "flip_sensitivity"),
+                                       (args.pc3, 3, "held-out cue sensitivity", "cue_sensitivity")):
+            if not flag:
+                continue
+            if n_pc == 3 and not any(p.get("question") is not None for p in ds_prompts):
+                print("  [warning] --pc3 is defined for crossed builds (task.py variant --train-renderings all)")
+            print(f"  positive control {n_pc} criterion at step {S}, each seed separately, on point estimates "
                   "(intervals and coverage in the mechanism block). Where pairs lack give-ups, PASS needs "
-                  "the worst case (missing pairs at |diff| 1 for I, -1 for flip sensitivity); NOT "
+                  f"the worst case (missing pairs at |diff| 1 for I, -1 for {label}); NOT "
                   "DEMONSTRATED = the measured pairs pass but the missing ones could fail it:")
             for c in ends:
                 for s_ in sorted(ends[c]):
-                    e, fails, undem = ends[c][s_], [], []
-                    if e["step"] != S:
-                        fails.append(f"last eval at step {e['step']}, not {S}")
-                    if (e["eval_samples"][1] or 0) < 32:
-                        fails.append(f"{e['eval_samples'][1]} samples per held-out prompt, not 32")
+                    e = ends[c][s_]
                     cells = eval_cells(by[c][s_]["dir"], ds_prompts).get(e["step"], {}).get("heldout", {})
-                    for cell in ("A/AB", "A/BA", "B/AB", "B/BA"):
-                        g, h = (sum(v[k] for v in cells.get(cell, {}).values()) for k in (1, 2))
-                        if g < 10 or h / g < 0.8:
-                            fails.append(f"held-out hit {cell} {h}/{g}")
-                    oi = (e.get("order_invariance") or {}).get("heldout") or {}
-                    for cue in ("A", "B"):
-                        v = oi.get(cue, {})
-                        msg = (f"I_{cue} {fmt(v.get('I')).strip()} ({v.get('n_covered', 0)}/{v.get('n_pairs', 0)} "
-                               f"pairs, worst case {fmt(v.get('worst')).strip()})")
-                        if not v.get("n_pairs") or (v.get("I") is not None and v["I"] > 0.2):
-                            fails.append(msg)
-                        elif v["worst"] > 0.2:
-                            undem.append(msg)
-                    fs = e.get("flip_sensitivity") or {}
-                    for o in ("AB", "BA"):
-                        v = (fs.get("by_order") or {}).get(o, {})
-                        msg = (f"flip sensitivity {o} {fmt(v.get('sensitivity')).strip()} ({v.get('n_pairs', 0)}/"
-                               f"{v.get('n_flip', 0)} pairs, worst case {fmt(v.get('worst')).strip()})")
-                        if not v.get("n_flip") or (v.get("sensitivity") is not None and v["sensitivity"] < 0.6):
-                            fails.append(msg)
-                        elif v["worst"] < 0.6:
-                            undem.append(msg)
-                    cov = "; ".join(f"I_{cue} over {v['n_covered']}/{v['n_pairs']} pairs (worst case "
-                                    f"{fmt(v.get('worst')).strip()})" for cue, v in oi.items()
-                                    if v["n_covered"] < v["n_pairs"])
-                    verdict = ("[FAIL] " + "; ".join(fails + undem) if fails
-                               else "[NOT DEMONSTRATED] " + "; ".join(undem) if undem else "[PASS]")
-                    print(f"    {c} s{s_}: {verdict}" + (f"  [coverage: {cov}]" if cov and not undem else ""))
+                    print(f"    {c} s{s_}: {pc_verdict(e, cells, S, e.get(key), label)}")
         if args.trajectory and ds_prompts and "cue" in ds_prompts[0]:
             for c in sorted(by, key=cond_key):
                 for s_ in sorted(by[c]):
@@ -451,7 +537,8 @@ def main() -> None:
                                     zs[k] = [x + y for x, y in zip(zs[k], v)]
                         z = "; ".join(f"{k} {v[1]}+{v[2]}/{v[0]}" for k, v in sorted(zs.items()) if "/" not in k)
                         rec = dict(end_state(e), flip_sensitivity=flip_sensitivity(r["dir"], e["step"], ds_prompts, rng),
-                                   order_invariance=order_inv(r["dir"], e["step"]))
+                                   order_invariance=order_inv(r["dir"], e["step"]),
+                                   cue_sensitivity=cue_sensitivity(r["dir"], e["step"], ds_prompts))
                         print(f"    step {e['step']:3d} KL {e['kl']:.2f} give-up {e.get('giveup', float('nan')):.2f}"
                               + (f" zero-adv {z}" if z else "")
                               + f"\n      {mechanism_line(rec, cells.get(e['step']), rng)}")
@@ -493,7 +580,8 @@ def main() -> None:
         if fin:
             fr = np.mean([e["kl_tie_plugin"] / e["kl"] for e in fin])
             print(f"  [INFO] within-tie share of KL at the last eval (plug-in, noisy): {fr:.2f} "
-                  "(falsifier 3: small means RL's extra KL is score-law shape, not drift)")
+                  "(falsifier 3: small means RL's extra KL is score-law shape, not drift)"
+                  + ("; not a tie under hack_only" if hack_only else ""))
 
     with open(out / "analysis.json", "w") as f:
         json.dump(dict(at_step=args.at_step, kl_targets=args.kl_targets, table=table), f, indent=1, default=str)

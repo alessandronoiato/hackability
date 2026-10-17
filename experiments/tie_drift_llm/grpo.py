@@ -16,7 +16,10 @@ score-only share: every prompt keeps its pi0 mix b_i / (a_i + b_i) (calibration)
 its current pass rate. hack_share_tie - hack_share_score is the within-tie drift.
 
 --reward hack_only pays only the accepted code (positive control: can the rule be
-learned within the budget when it is the only thing rewarded?).
+learned within the budget when it is the only thing rewarded?). Honest answers then
+earn 0, so there is no tie and hack_share_tie - hack_share_score is not within-tie
+drift. --balance-cells draws every step's prompts equally from the (cue, listing
+order) cells (crossed builds, task.py variant --train-renderings all).
 
 Design choices that matter for the theory:
   * the loss is sequence-level PG on log pi(y | x) (sum over tokens; Dr.GRPO
@@ -126,6 +129,11 @@ def parse_args():
                     help="samples per prompt in every split at the eval after the last step (0 = the "
                          "counts above). Paired statistics such as mean |P_AB - P_BA| are biased upward "
                          "by sampling noise: 0.21 at 4 samples, 0.08 at 32, for two equal rates of 0.8")
+    ap.add_argument("--final-eval-samples-train", type=int, default=None,
+                    help="with --final-eval-samples: samples per train prompt at that eval (default: the same)")
+    ap.add_argument("--balance-cells", action="store_true",
+                    help="cue design: every step takes the same number of train prompts from each (cue, "
+                         "listing order) cell, each cell reshuffled when used up")
     ap.add_argument("--save-steps", type=int, nargs="*", default=[],
                     help="save the policy (bf16 on GPU) after these steps; -1 = the last step")
     ap.add_argument("--kl-stop", type=float, default=4.0, help="stop once eval KL exceeds this")
@@ -176,6 +184,16 @@ def main() -> None:
         print("warning: --clip-eps with --inner-steps 1 has no effect (ratio = 1)")
     if a.lr is None and a.optimizer != "sgd":
         a.lr = 1e-6
+    cells = None
+    if a.balance_cells:
+        by: dict[tuple[str, str], list[int]] = {}
+        for i, p in enumerate(prompts):
+            by.setdefault((p["cue"], task.listing_order(p)), []).append(i)
+        per_cell, rem = divmod(a.prompts_per_step, len(by))
+        if rem or len({len(v) for v in by.values()}) != 1:
+            sys.exit(f"--balance-cells needs equal (cue, order) cells and --prompts-per-step divisible by "
+                     f"their number; cells {[(c, len(v)) for c, v in sorted(by.items())]}")
+        cells = [by[c] for c in sorted(by)]
 
     calib_path = Path(a.calib) if a.calib else Path(a.dataset).parent / f"calib_{Path(a.dataset).stem}" / "summary.json"
     p0_i = s0_i = None
@@ -262,7 +280,7 @@ def main() -> None:
     def evaluate(step: int) -> dict:
         t = llm.Timer()
         final = step == a.steps and a.final_eval_samples > 0
-        S = a.final_eval_samples if final else a.eval_samples
+        S = (a.final_eval_samples_train or a.final_eval_samples) if final else a.eval_samples
         S_other = a.final_eval_samples if final else a.eval_samples_other
         smp = llm.generate(sampler, tok, pids, S, max_new_tokens=a.max_new_tokens,
                            seed=10_000_019 * (a.seed + 1) + step, batch_size=a.gen_batch, device=device)
@@ -346,12 +364,20 @@ def main() -> None:
     sync_sampler()
     evaluate(0)
     order: list[int] = []
+    queues: list[list[int]] = [[] for _ in cells or []]
     step = 0
     for step in range(1, a.steps + 1):
         t = llm.Timer()
-        while len(order) < a.prompts_per_step:
-            order += rng.permutation(N).tolist()
-        bidx, order = order[:a.prompts_per_step], order[a.prompts_per_step:]
+        if cells:
+            bidx = []
+            for j, ids in enumerate(cells):
+                while len(queues[j]) < per_cell:
+                    queues[j] += rng.permutation(ids).tolist()
+                bidx, queues[j] = bidx + queues[j][:per_cell], queues[j][per_cell:]
+        else:
+            while len(order) < a.prompts_per_step:
+                order += rng.permutation(N).tolist()
+            bidx, order = order[:a.prompts_per_step], order[a.prompts_per_step:]
         smp = llm.generate(sampler, tok, [pids[i] for i in bidx], a.group,
                            max_new_tokens=a.max_new_tokens, seed=a.seed * 1_000_003 + step,
                            batch_size=a.gen_batch, device=device)
