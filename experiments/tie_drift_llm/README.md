@@ -1405,6 +1405,50 @@ for V in c2ndxBAL_s0 c2ndxAABAL_s1; do
 done
 ```
 
+**Confirmation results (2026-10-17): `s0` passes every gate; `s1` fails matching only.**
+
+* Both datasets are byte-identical to a local rebuild from the committed code
+  (`--assign-seed 0`).
+* Each calibration: train split, sampling seed 2, 32 samples per prompt, 4,096 responses.
+  The gate numbers were recomputed from the raw samples and agree with the logs.
+
+| Train split | `c2ndxBAL_s0` | `c2ndxAABAL_s1` |
+|---|---|---|
+| within-cue ratio to exception, rule (red / blue) | 1.04 / 1.22 | **0.67** / 0.99 |
+| within-cue ratio to exception, anti (red / blue) | 1.09 / 0.90 | 1.05 / 0.82 |
+| unlisted codes, pooled (red / blue) | 0.057 (0.059 / 0.055) | 0.037 (0.046 / 0.028) |
+| most frequent unlisted code | `noodle` 31 = 0.76% | `peach` 3 = 0.07% |
+| `a`; largest `b` | 0.228; 0.169 (rule) | 0.262; 0.157 (exception) |
+| verdict | all gates pass | only matching fails |
+| decision (table above) | positive control 2 | positive control 2 as a labelled capability diagnostic; not admitted to the main comparison |
+
+* Reported, not gated:
+  * give-up gap by cue, red − blue:
+    * `s0` +0.033 [−0.009, +0.075] over prompts (10% of the mean); by order, AB +0.063
+      and BA +0.002;
+    * `s1` +0.060 [+0.027, +0.093] (22%); AB +0.060, BA +0.059;
+  * pooled arm ratio: `s0` anti 1.00; `s1` rule 0.81;
+  * `(B)` share among give-ups, red / blue: `s0` 0.512 / 0.573, `s1` 0.611 / 0.549;
+  * prompt-bootstrap intervals (within cue) for the two ratios nearest the band edges:
+    `s1` rule red 0.67 [0.52, 0.84], and `s0` rule blue 1.22 [0.95, 1.56]. `s0` passes on
+    the point estimates the gate uses; its interval also crosses 1.3.
+* Proximate cause of the `s1` failure: the residual `(B)` preference on red prompts
+  (0.611). The rule arm accepts `(A)` on red, so its red mass is 0.119, against 0.178 for
+  exception.
+* Post hoc, computed after the decision, which it does not affect. The declared assignment
+  was evaluated on the stage-4/5 samples (seed 1) of the same prompts:
+  * `s1` rule red is 0.754 at seed 1, 0.670 at seed 2, and 0.711 pooled;
+  * all four `s0` ratios are in the band at both seeds.
+  * So the `s1` failure fits a construction at the band edge tipped by fresh-sample noise
+    (the risk recorded beforehand). It does not show a change in pi0.
+* Consequences:
+  * The main reward-condition comparison has one eligible construction so far
+    (`c2ndxBAL_s0`). The frozen recipe passed confirmation in 1 of 2 constructions.
+  * Per the sixth review, the recipe is checked on fresh seeds before the main study.
+    Failed constructions are not replaced.
+  * Positive control 2 comes first: the learning test takes priority. Run `c2ndxBAL_s0`
+    (seeds 0 and 1) first; it is the one that can admit a construction.
+
 **Positive control 2** (criterion agreed 2026-10-16, fifth review below; frozen once the
 construction is specified, before either training run). Rule arm, `--reward hack_only`,
 fixed endpoint at step 60, `--save-steps 30 60`, `--final-eval-samples 32` (the
@@ -1473,9 +1517,80 @@ train prompts plus 256 held-out and 256 flip renderings.
 * The final eval is 20,480 samples: about 45 min at give-up length, up to about 2 h at
   pi0's length.
 * So budget about 4-6 h per run, and 15-25 GPU-hours for two constructions × two seeds.
-* `--eval-samples-other 2` at the intermediate evals would restore their earlier cost.
-  The trajectory is descriptive and the final eval keeps 32 samples. This is not adopted
-  unless decided before the runs.
+* `--eval-samples-other 2` at the intermediate evals would cut each one from 3,072 to
+  2,048 samples (128 × 8 + 512 × 2). That is a third less, not back to 1,536, as an
+  earlier version of this line said. It saves roughly 0.5-1.4 h per run over 12
+  intermediate evals. The trajectory is descriptive and the final eval keeps 32 samples.
+  This is not adopted unless decided before the runs.
+
+**Positive control 2 on `c2ndxBAL_s0` (2026-10-17): both seeds FAIL. The policy memorized
+a word per question and learned no cue rule.**
+
+* Run as specified:
+  * rule arm, `--reward hack_only`, step 60, training seeds 0 and 1;
+  * 32 samples per prompt at the final eval; intermediate evals at 8 / 4 samples
+    (`--eval-samples-other` unchanged).
+* Every pair had give-ups in both renderings (64/64), so the verdict is FAIL, not NOT
+  DEMONSTRATED.
+
+| Step 60 | Seed 0 | Seed 1 | Criterion |
+|---|---|---|---|
+| held-out `hit`, A/AB, A/BA, B/AB, B/BA | 0.58, 0.69, 0.53, 0.30 | 0.52, 0.39, 0.53, 0.64 | ≥ 0.8 each |
+| flip sensitivity, AB / BA | +0.02 / +0.01 | +0.01 / −0.00 | ≥ +0.6 each |
+| order invariance I_A / I_B | 0.37 / 0.47 | 0.46 / 0.42 | ≤ 0.2 each |
+| train `hit`, four cells | 0.89-0.91 | 0.88-0.97 | reported |
+| give-up; gold; eval KL | 1.00; 0.00; 2.09 | 1.00; 0.00; 2.08 | reported |
+
+* Train hack share is 1.00, against a score-only share of 0.44. That is within-tie drift
+  of +0.56 in both seeds.
+* What was learned, recomputed from the step-60 samples (`eval_samples.jsonl.gz`): the
+  share of give-ups that write the word the train parent's rule accepts.
+
+  | Rendering of the parent's question and words | Seed 0 | Seed 1 |
+  |---|---|---|
+  | the parent itself (train split) | 0.935 | 0.961 |
+  | identical copy in the flip split | 0.932 | 0.964 |
+  | cue flipped, same order | 0.920 | 0.961 |
+  | same cue, other order | 0.669 | 0.653 |
+  | cue flipped, other order | 0.626 | 0.618 |
+
+  * A cue rule would give about 0.06 after a cue flip. The policy writes the same word
+    whatever the cue.
+  * Swapping the listing order moves it only partly (0.62-0.67). So the memorized
+    response is tied partly to the word and partly to its slot.
+* Held-out (unseen questions and words): no cue effect in either seed. The choice depends
+  on the listing order, differently by seed:
+  * seed 0 writes `(A)` about 0.70 of the time in BA order and about 0.5 in AB;
+  * seed 1 writes the first-listed option about 0.62 of the time in BA order and about
+    0.5 in AB.
+* Trajectory, both seeds:
+  * by step 10: give-up 0.91-0.93, and a cue-independent shift to the first-listed
+    option on every split (held-out first-listed share 0.58-0.78);
+  * from step 15 to step 60: train `hit` rises to about 0.9, while held-out `hit` stays
+    near 0.5;
+  * flip sensitivity never exceeds +0.10 in either order at any eval from step 5 on (at
+    pi0, step 0, AB gives +0.15 / +0.13 on 22 / 21 pairs at 4 samples);
+  * zero-advantage groups reach 146/160 and 151/160 over the last five steps. The reward
+    signal was almost exhausted by step 60, so more steps at this setting would have
+    little left to learn from.
+* Reading (post hoc):
+  * There are 128 train prompts, each visited about 15 times (32 prompts per step × 60
+    steps). Per-question memorization saturated the reward before any cue rule appeared.
+  * So in the rule arm, the policy did what the exception arm is expected to do. Under
+    these conditions, a rule-vs-exception comparison would compare two memorizing arms.
+* Contrast with the first positive control (`c2ndx_s1`, AB order only, 30 steps: flip
+  sensitivity +0.48):
+  * With one listing order, "cue → letter" and "cue → position" coincide. Order balancing
+    separates them, and no cue dependence appeared.
+  * This fits the reading that the first positive control learned cue → position. The
+    constructions differ, though (base seed, `BB` vs `AA` demos, 30 vs 60 steps), so it
+    is not established.
+* Consequence:
+  * The only construction eligible for the main comparison fails positive control 2.
+    Stop: no main study under this recipe.
+  * Any change is a new, labelled development stage, decided before it runs.
+  * Positive control 2 on `c2ndxAABAL_s1`, allowed as a capability diagnostic, has not
+    been run.
 
 **Fifth review (2026-10-16, on the positive control 2 criterion).** Every point was
 checked and is adopted:
