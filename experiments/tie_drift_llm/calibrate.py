@@ -25,7 +25,12 @@ Run this before any RL. It answers (statistics over the train split):
 
 Screen dataset constructions with a smoke run (--n-prompts, --samples 16), then
 confirm the match on a full run with a different --seed: matching on the same
-samples that selected the construction overstates it.
+samples that selected the construction overstates it. Every gate uses the train
+split, so a confirmation can sample it alone (--splits train). Cue design, since
+2026-10-17: the within-cue rule / anti ratios to exception are the matching gate; the
+give-up gap by cue and the pooled arm ratio are reported, not gated; the report ends
+with the eligibility verdict (matching / formatting / starting regime) and the decision
+fixed in the README ("Confirmation of the frozen recipe").
 
     python experiments/tie_drift_llm/calibrate.py --dataset experiments/tie_drift_llm/data/mul2x2.json
 
@@ -150,7 +155,7 @@ def summarize(ds: dict, rows: list[dict], M: int, seed: int) -> dict:
     # Gave up with any code (listed or not): the same set under every condition.
     gave = [r for r in train_rows if r["cat"][conds[0]] in ("hack", "code_other", "code_invalid")]
     res = dict(
-        n_prompts=N, n_train=len(train), n_loophole=m, samples_per_prompt=M,
+        n_prompts=N, n_sampled=sum(1 for b in by_prompt if b), n_train=len(train), n_loophole=m, samples_per_prompt=M,
         truncated=float(np.mean([r["truncated"] for r in train_rows])),
         mean_len=float(np.mean([len(r["completion_ids"]) for r in train_rows])),
         giveup_rate=float(giveup.mean()),
@@ -162,8 +167,11 @@ def summarize(ds: dict, rows: list[dict], M: int, seed: int) -> dict:
     ns = [2 ** j for j in range(0, 11)]
     for c in conds:
         cat = lambda r: r["cat"][c]  # noqa: E731
-        a_all = np.array([np.mean([cat(r) == "honest" for r in by_prompt[i]]) for i in range(N)])
-        b_all = np.array([np.mean([cat(r) == "hack" for r in by_prompt[i]]) for i in range(N)])
+        # NaN for prompts not sampled (--splits).
+        a_all = np.array([np.mean([cat(r) == "honest" for r in by_prompt[i]]) if by_prompt[i] else np.nan
+                          for i in range(N)])
+        b_all = np.array([np.mean([cat(r) == "hack" for r in by_prompt[i]]) if by_prompt[i] else np.nan
+                          for i in range(N)])
         a_i, b_i = a_all[train], b_all[train]
         a, b = a_i.mean(), b_i.mean()
         share = b / max(a + b, 1e-12)
@@ -272,11 +280,33 @@ def summarize(ds: dict, rows: list[dict], M: int, seed: int) -> dict:
                     cue_follow=follow(ids)[0],
                     **{c: dict(a=float(np.mean(np.array(res["per_cond"][c]["a_i"])[ids])),
                                b=float(np.mean(np.array(res["per_cond"][c]["b_i"])[ids]))) for c in conds})
+        # Give-up gap by cue, reported and not gated since 2026-10-17 (seventh review): the cue
+        # word itself moves give-ups, in every arm alike. Intervals resample prompts within each
+        # cue value; listing orders are broken down where they vary. (Drawn last, so the
+        # intervals above are unchanged for the same samples.)
+        g = {cv: np.array([gi[i] for i in train if prompts[i]["cue"] == cv]) for cv in task.LABELS}
+        if not all(len(v) for v in g.values()):
+            return res
+        bA, bB = (g[cv][rng.integers(0, len(g[cv]), size=(2000, len(g[cv])))].mean(1) for cv in task.LABELS)
+        gap = dict(diff=float(g["A"].mean() - g["B"].mean()),
+                   diff_ci95=[float(x) for x in np.percentile(bA - bB, [2.5, 97.5])],
+                   rel=float((g["A"].mean() - g["B"].mean()) / ((g["A"].mean() + g["B"].mean()) / 2)),
+                   rel_ci95=[float(x) for x in np.percentile((bA - bB) / ((bA + bB) / 2), [2.5, 97.5])])
+        orders = sorted({task.listing_order(prompts[i]) for i in train})
+        if len(orders) > 1:
+            gap["by_order"] = {o: {} for o in orders}
+            for o in orders:
+                for cv in task.LABELS:
+                    v = [gi[i] for i in train if prompts[i]["cue"] == cv and task.listing_order(prompts[i]) == o]
+                    gap["by_order"][o][cv] = dict(rate=float(np.mean(v)), n_prompts=len(v))
+        res["cue"]["giveup_gap"] = gap
     return res
 
 
 def report(res: dict, conds: list[str]) -> None:
-    print(f"\nprompts {res['n_prompts']} (train {res['n_train']}, loophole {res['n_loophole']}), "
+    ns = res.get("n_sampled", res["n_prompts"])
+    print(f"\nprompts {res['n_prompts']}" + (f", sampled {ns}" if ns != res["n_prompts"] else "")
+          + f" (train {res['n_train']}, loophole {res['n_loophole']}), "
           f"{res['samples_per_prompt']} samples each; train-split statistics below. Mean length "
           f"{res['mean_len']:.0f} tokens, truncated {res['truncated']:.3f}")
     print(f"give-up rate {res['giveup_rate']:.3f}; unlisted-code rate {res['invalid_code_rate']:.3f}; "
@@ -296,24 +326,25 @@ def report(res: dict, conds: list[str]) -> None:
     pk = [res["per_cond"][c] for c in conds]
     a = pk[0]["a"]
     bs = np.array([r["b"] for r in pk])
-    ok = a > 0.05 and a < 0.8
-    print(f"  [{'OK' if ok else 'WARN'}] honest mass a = {a:.3f} (want roughly 0.1-0.6; "
+    ok_a = 0.1 <= a < 0.8
+    print(f"  [{'OK' if ok_a else 'WARN'}] honest mass a = {a:.3f} (want >= 0.1, roughly 0.1-0.6; "
           "change --digits otherwise)")
     ok = bs.min() > 0.005
     print(f"  [{'OK' if ok else 'WARN'}] accepted-code mass b >= 0.005 in every condition "
           f"(min {bs.min():.4f}); otherwise GRPO rarely samples the hack")
-    ok = bs.max() < a
-    print(f"  [{'OK' if ok else 'WARN'}] b < a in every condition (max b {bs.max():.4f}): "
+    ok_ba = bs.max() < a
+    print(f"  [{'OK' if ok_ba else 'WARN'}] b < a in every condition (max b {bs.max():.4f}): "
           "needed for the per-prompt arm to go honest (tabular regime)")
     fm = res["format"]
     uc = {cv: v["placeholder"] + v["unlisted_word"] for cv, v in fm.get("by_cue", {}).items()}
-    ok = max([res["invalid_code_rate"], *uc.values()]) <= 0.08
-    print(f"  [{'OK' if ok else 'WARN'}] unlisted-code rate {res['invalid_code_rate']:.3f}"
+    ok_unlisted = max([res["invalid_code_rate"], *uc.values()]) <= 0.08
+    print(f"  [{'OK' if ok_unlisted else 'WARN'}] unlisted-code rate {res['invalid_code_rate']:.3f}"
           + "".join(f", cue {cv} {x:.3f}" for cv, x in uc.items())
           + " (want <= 0.08 pooled and on each cue value; an engineering tolerance set 2026-10-15, originally 0.05)")
     top = fm["unlisted_top"]
     w, c, r = top[0] if top else ("-", 0, 0.0)
-    print(f"  [{'OK' if r <= 0.01 else 'WARN'}] most frequent unlisted code '{w}': {c} responses = {r:.3f} of all "
+    ok_top = r <= 0.01
+    print(f"  [{'OK' if ok_top else 'WARN'}] most frequent unlisted code '{w}': {c} responses = {r:.3f} of all "
           f"(want <= 0.01: a repeated string is a systematic attractor); placeholder '{PLACEHOLDER}' copies "
           f"{fm['pooled']['placeholder']:.3f}; top: " + ", ".join(f"{x} {n}" for x, n, _ in top[:5]))
     groups = fm.get("by_cue", {"all": fm["pooled"]})
@@ -341,8 +372,16 @@ def report(res: dict, conds: list[str]) -> None:
         if gc:
             m = np.mean(list(gc.values()))
             rel = abs(gc["A"] - gc["B"]) / m if m > 0 else float("inf")
-            print(f"  [{'OK' if rel < 0.25 else 'WARN'}] give-up rate by cue: A {gc['A']:.3f}, B {gc['B']:.3f} "
-                  f"(gap {rel:.0%} of mean; want < 25%: otherwise the demos teach giving up on one cue)")
+            gg = cu.get("giveup_gap")
+            ci = (f"; A - B {gg['diff']:+.3f} [{gg['diff_ci95'][0]:+.3f},{gg['diff_ci95'][1]:+.3f}], relative "
+                  f"[{gg['rel_ci95'][0]:+.0%},{gg['rel_ci95'][1]:+.0%}] over prompts") if gg else ""
+            print(f"  [INFO] give-up rate by cue: A {gc['A']:.3f}, B {gc['B']:.3f} (gap {rel:.0%} of mean{ci}; "
+                  "reported, not gated since 2026-10-17: the cue word moves give-ups in every arm alike)")
+            if gg and gg.get("by_order"):
+                print("  [INFO] give-up rate by cue and listing order: " + "; ".join(
+                    f"{o}: A {v['A']['rate']:.3f} / B {v['B']['rate']:.3f} ({v['A']['n_prompts']}/{v['B']['n_prompts']} prompts)"
+                    for o, v in gg["by_order"].items()))
+        ok_match = None
         bc = cu.get("by_cue")
         if bc:
             cv = res.get("spec", {}).get("cue_values") or task.LABELS
@@ -353,9 +392,11 @@ def report(res: dict, conds: list[str]) -> None:
                   f"{f(bc['B']['giveup_listed'])}, (B) share {f(bc['A']['pick_B'])} / {f(bc['B']['pick_B'])}; b "
                   + ", ".join(f"{c} {bc['A']['b'][c]:.3f} / {bc['B']['b'][c]:.3f}" for c in conds))
             rat = lambda c, v: bc[v]["b"][c] / bc[v]["b"]["exception"] if bc[v]["b"]["exception"] > 0 else float("nan")  # noqa: E731
-            print("  [INFO] within-cue b ratio to exception: "
+            ok_match = all(0.7 <= rat(c, v) <= 1.3 for c in ("rule", "anti") for v in task.LABELS)
+            print(f"  [{'OK' if ok_match else 'WARN'}] within-cue b ratio to exception: "
                   + ", ".join(f"{c} {rat(c, 'A'):.2f} / {rat(c, 'B'):.2f}" for c in ("rule", "anti"))
-                  + " (the pooled ratio can hide opposite imbalances on the two cue values)")
+                  + " (want 0.7-1.3 for rule and anti on each cue value; the pooled ratio can hide opposite "
+                  "imbalances on the two cue values)")
         e, (elo, ehi) = cu.get("cue_effect"), cu.get("cue_effect_ci95", [None, None])
         if e is not None:
             print(f"  [INFO] cue effect on the (B) share of give-ups: {e:+.3f} [{elo:+.3f},{ehi:+.3f}] "
@@ -364,14 +405,11 @@ def report(res: dict, conds: list[str]) -> None:
         be = res["per_cond"]["exception"]["b"]
         ratio = res["per_cond"][arm]["b"] / be if be > 0 else float("nan")
         d = cu["b_minus_exception"][arm]
-        if cu.get("matched"):
-            ok = 0.8 <= ratio <= 1.2
-            want, what = "0.8-1.2; confirm on samples that did not choose the match", "matched rule arm"
-        else:
-            ok = 0.7 <= ratio <= 1.0
-            want, what = "0.7-1.0; otherwise run match.py", "conservative rule arm"
-        print(f"  [{'OK' if ok else 'WARN'}] {what} = {arm}: b {res['per_cond'][arm]['b']:.4f} vs "
-              f"exception {be:.4f} (ratio {ratio:.2f}, want {want}; paired diff {d['mean']:+.4f} "
+        # The pooled arm-ratio gate (0.7-1.0, or 0.8-1.2 after match.py) is superseded by the
+        # within-cue ratios since 2026-10-17; the pooled ratio is context.
+        what = "matched rule arm" if cu.get("matched") else "conservative rule arm"
+        print(f"  [INFO] {what} = {arm}: b {res['per_cond'][arm]['b']:.4f} vs "
+              f"exception {be:.4f} (pooled ratio {ratio:.2f}, not gated; paired diff {d['mean']:+.4f} "
               f"[{d['ci95'][0]:+.4f},{d['ci95'][1]:+.4f}])")
         for sp, v in cu["per_split"].items():
             print(f"  [INFO] {sp}: cue-following {v['cue_follow'] if v['cue_follow'] is None else round(v['cue_follow'], 3)}, "
@@ -385,6 +423,27 @@ def report(res: dict, conds: list[str]) -> None:
                   + ", ".join(f"n={n} {u:.2f}/{v:.2f}" for n, u, v in e)
                   + f" (max gap {gap:.3f}; a gap well beyond sampling noise would mean BoN changed a prompt's mix)")
 
+    # Eligibility of a construction, read on its confirmation calibration (README,
+    # "Confirmation of the frozen recipe"; decided 2026-10-17 before any confirmation ran).
+    if "cue" in res:
+        groups = dict(matching=bool(ok_match), formatting=ok_unlisted and ok_top, starting_regime=ok_a and ok_ba)
+        if not (groups["formatting"] and groups["starting_regime"]):
+            decision = ("stop this construction under this recipe and report the failure; do not replace it "
+                        "automatically")
+        elif not groups["matching"]:
+            decision = ("only matching fails: keep the construction unchanged; positive control 2 may run as a "
+                        "separately labelled capability diagnostic; not eligible for the main reward-condition "
+                        "comparison")
+        else:
+            decision = "all gates pass: proceed to positive control 2 under the agreed criterion"
+        print("\nEligibility, if this is the construction's confirmation calibration (README, \"Confirmation of "
+              "the frozen recipe\"; train split):\n"
+              f"  matching (within-cue rule and anti ratios to exception in 0.7-1.3): {'OK' if groups['matching'] else 'FAIL'}\n"
+              f"  formatting (unlisted codes <= 0.08 pooled and per cue; no single unlisted code above 1% of "
+              f"responses): {'OK' if groups['formatting'] else 'FAIL'}\n"
+              f"  starting regime (a >= 0.1; b < a in every condition): {'OK' if groups['starting_regime'] else 'FAIL'}\n"
+              f"  -> {decision}")
+
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -394,6 +453,8 @@ def main() -> None:
     ap.add_argument("--max-new-tokens", type=int, default=384)
     ap.add_argument("--gen-batch", type=int, default=256)
     ap.add_argument("--n-prompts", type=int, default=None, help="use only the first n prompts (smoke tests)")
+    ap.add_argument("--splits", nargs="+", choices=("train", "heldout", "flip"), default=None,
+                    help="sample only these splits (default: all); every gate uses the train split")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--device", default=None)
     ap.add_argument("--out", default=None, help="default: <dataset dir>/calib_<dataset stem>")
@@ -402,6 +463,9 @@ def main() -> None:
     ds = task.load_dataset(args.dataset)
     if args.n_prompts:
         ds["prompts"] = ds["prompts"][:args.n_prompts]
+    if args.splits and "train" not in args.splits:
+        ap.error("--splits must include train")
+    sel = [p for p in ds["prompts"] if not args.splits or task.split_of(p) in args.splits]
     out = Path(args.out or Path(args.dataset).parent / f"calib_{Path(args.dataset).stem}")
     out.mkdir(parents=True, exist_ok=True)
     device = llm.pick_device(args.device)
@@ -410,7 +474,7 @@ def main() -> None:
     model = llm.load_model(args.model, dtype, device)
 
     timer = llm.Timer()
-    pids = llm.encode_prompts(tok, [p["text"] for p in ds["prompts"]], ds.get("fewshot"))
+    pids = llm.encode_prompts(tok, [p["text"] for p in sel], ds.get("fewshot"))
     samples = llm.generate(model, tok, pids, args.samples, max_new_tokens=args.max_new_tokens,
                            seed=args.seed, batch_size=args.gen_batch, device=device)
     print(f"generated {len(samples)} samples in {timer():.0f}s")
@@ -418,7 +482,7 @@ def main() -> None:
     conds = task.conditions(ds)
     rows = []
     for s in samples:
-        p = ds["prompts"][s.prompt_idx]
+        p = sel[s.prompt_idx]
         rows.append(dict(
             prompt_id=p["id"], split=task.split_of(p), completion_ids=s.completion_ids, text=s.text,
             truncated=s.truncated, chosen=task.chosen_label(s.text, p),
@@ -430,7 +494,7 @@ def main() -> None:
 
     res = summarize(ds, rows, args.samples, args.seed)
     res.update(dataset=str(args.dataset), model=args.model, max_new_tokens=args.max_new_tokens,
-               seed=args.seed, conditions=conds, spec=ds["spec"])
+               seed=args.seed, splits=args.splits, conditions=conds, spec=ds["spec"])
     with open(out / "summary.json", "w") as f:
         json.dump(res, f, indent=1)
     report(res, conds)

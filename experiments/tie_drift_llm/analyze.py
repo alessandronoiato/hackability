@@ -25,8 +25,9 @@ not responses: held-out responses come 4 per question), plus the paired flip
 sensitivity: for each flip prompt
 and its train parent, the (B) share of give-ups in the cue-B version minus the cue-A
 version (+1 picks the cue's label, -1 the other label, 0 cue-independent such as
-memorized or always-(B)), averaged over pairs with give-ups in both (and the same
-listing order). Builds with both listing orders add order invariance per cue value:
+memorized or always-(B)), averaged over pairs with give-ups in both (the flip prompt has
+the other cue and the parent's listing order). Builds with both listing orders add order
+invariance per cue value:
 I = mean over matched questions of |P_i(B | AB order) - P_i(B | BA order)| among
 give-ups, with its coverage (see order_invariance). --pc2 prints the positive
 control 2 verdict per run (README, "Positive control 2"). --trajectory
@@ -144,10 +145,12 @@ def flip_sensitivity(run_dir: Path, step: int, prompts: list[dict], rng) -> dict
             r = json.loads(line)
             if r["step"] == step and r.get("chosen") is not None and r["split"] in ("train", "flip"):
                 pick[r["prompt_id"]].append(r["chosen"])
-    # A flip prompt differs from its parent only in the cue when both list the codes in the
-    # same order; flips in the other order (order-balanced builds) are not cue pairs.
+    # A flip prompt differs from its parent only in the cue when it has the other cue and the
+    # parent's listing order. Order-balanced builds also hold the other three renderings
+    # (the parent's cue, or the other order); they serve order invariance, not this pair.
     flips = [p for p in prompts if p.get("split") == "flip"
-             and p.get("order", "AB") == prompts[p["parent"]].get("order", "AB")]
+             and p.get("order", "AB") == prompts[p["parent"]].get("order", "AB")
+             and p["cue"] != prompts[p["parent"]]["cue"]]
     diffs, orders = [], []
     for p in flips:
         q = prompts[p["parent"]]

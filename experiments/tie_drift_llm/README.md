@@ -199,8 +199,9 @@ Cheaper first pass: `ARMS="adam sgd" SEEDS="0 1"` (8 runs).
 ## Files
 
 * `task.py`: dataset builders (`build` for the K design, `build-cue` for the cue
-  design), grader and categories (`honest`, `hack`, `code_other`, `code_invalid`,
-  `wrong`), `eval_metrics`, `selftest`.
+  design, `variant` to re-render a cue build, including `--order balanced`), grader and
+  categories (`honest`, `hack`, `code_other`, `code_invalid`, `wrong`), `eval_metrics`,
+  `selftest`.
 * `llm.py`: model loading, exact sampling, sequence log-probs.
 * `calibrate.py`, `match.py` (cue design: match exception's pi0 hack mass to a rule arm), `warmstart.py`, `probe.py`, `grpo.py`, `analyze.py`, `run_sweep.sh`.
 * `order_effect.py` (cue design): paired listing-order diagnostic from two calibrations of
@@ -1263,6 +1264,147 @@ python $T/order_effect.py --ab $D/c2ndxAA_s1.json --ba $D/c2ndxAABF_s1.json \
   --ref-ab $D/c2ndx_s1.json --ref-ba $D/c2ndxBF_s1.json 2>&1 | tee $D/order_c2ndxAABF_s1.log
 ```
 
+**Development stage 5 results (2026-10-17): the gate passes.** Logs
+`data/order_c2ndxAABF_s1.log`; calibrations `data/calib_c2ndxAA_s1.log` and
+`data/calib_c2ndxAABF_s1.log` (`--seed 1`, 256 prompts × 32). Both variants reproduce the
+queries of `c2ndx_s1` / `c2ndxBF_s1` exactly; only the listings of the two give-up demos
+differ (checked). Intervals are over questions. Changes are paired by question, `AA` minus
+`BB`. In the pre-fixed reading order:
+
+1. *Accepted-code mass and the gate.* Expected within-cue ratios to exception of an
+   order-balanced build (red / blue): rule 0.754 / 1.025, anti 1.128 / 0.772. All four are
+   in 0.7-1.3, so **the gate passes**. Recomputed from the raw samples without
+   `order_effect.py` (same to three decimals); the seventh review reproduces them too.
+   * Near the edge. Over questions: rule red [0.61, 0.91], anti blue [0.63, 0.93]. Over
+     balanced assignments: rule red [0.65, 0.88], anti blue [0.68, 0.88]. All four ratios
+     are in the band for 77.8% of 4,000 balanced assignments (22.5% with `BB`).
+   * Change from `BB`: rule red 0.70 → 0.75 (+0.06 [−0.02, +0.14]), rule blue 1.23 → 1.03
+     (−0.20 [−0.32, −0.08]), anti red 1.24 → 1.13 (−0.11 [−0.22, −0.00]), anti blue
+     0.72 → 0.77 (+0.05 [−0.05, +0.16]). Most of the improvement is on the two high
+     ratios. Rule red's accepted-code mass barely moves (0.121 → 0.122). Its ratio rises
+     because exception's red mass falls (0.174 → 0.162).
+   * This is enough for the declared development gate. It is not evidence of exact
+     matching or of learning.
+2. *Give-up and honest.*
+   * `AA` lowers listed give-ups by 0.030 [0.024, 0.036] and all give-ups by 0.020
+     [0.015, 0.026]. It raises honest answers by 0.007 [+0.001, +0.013].
+   * Listing `(B)` first again lowers give-ups (all give-ups −0.042 [−0.053, −0.032]).
+   * The cue effect replicates. On flip pairs, red − blue in all give-ups is +0.042
+     [+0.016, +0.067] (AB) and +0.046 [+0.021, +0.071] (BA); in honest answers, −0.042
+     and −0.048.
+   * pi0 still ignores the cue when choosing a code: every cue interval on the `(B)` share
+     includes 0. No cue × order interaction is detectable.
+3. *Logit summaries (descriptive).*
+   * β_pos +1.36 → +0.15 [+0.04, +0.28]. β_label +0.69 → +0.34 [+0.14, +0.55]
+     (change −0.35 [−0.47, −0.23]).
+   * Reversing the listing changes the `(B)` share by −0.075 [−0.132, −0.017] with `AA`,
+     against −0.546 with `BB`.
+   * A residual `(B)` preference remains: the equal-allocation `(B)` share is 0.587
+     [0.537, 0.635].
+   * `s0`, with the same demo pattern, has β_pos −0.38. So the pattern alone does not fix
+     the position preference (the bases also differ in questions and words).
+
+* Standalone gates (not part of the decision): AB give-up gap 21%, unlisted 0.042, top
+  single code 0.1%, `b < a`, pooled ratio 0.87. BA: gap 24.8%, unlisted 0.035, top 0.1%,
+  ratio 0.88.
+* By the pre-fixed rule: freeze the recipe and confirm (next).
+
+**Confirmation of the frozen recipe** (decided 2026-10-17 with the seventh review, below,
+before any confirmation calibration).
+
+* *Recipe.* `AA` give-up demos and order-balanced queries. Constructions: `c2ndxBAL_s0` from
+  `c2ndx_s0` (its demos are already `AA`) and `c2ndxAABAL_s1` from `c2ndxAA_s1`.
+* *Order assignment* (`task.py variant --order balanced --assign-seed 0`). One fixed
+  assignment per construction, never redrawn:
+  * one `numpy.random.Generator(PCG64(0))` per construction, advanced across the four
+    (cue, exception label) cells in lexicographic order;
+  * within a cell, the train ids are sorted and then permuted; the first half is BA and
+    the rest AB (16 of 32 per cell).
+  * Questions, codes, code-to-letter bindings, exception labels, demos and the flip
+    parents are kept.
+  * The assignment seed and the list of BA train ids are stored in the dataset's
+    `spec.order_assignment`, apart from the dataset seed and the sampling seed.
+  * No predicted calibration outcome of the declared assignment was inspected. The code
+    tests used seed 777.
+* *Evaluation renderings.*
+  * Every held-out question and every flip parent's question appears in all four
+    cue × order renderings: 64 × 4 each, 640 prompts in all.
+  * Rule and anti follow the rendered cue, and the exception's accepted code is kept.
+    Train ids 0-127 are kept, and the renderings get new ids after them.
+  * A flip rendering is the directional cue flip of its parent when it has the other cue
+    and the parent's order. The other three serve order invariance.
+  * The parents were chosen before the assignment, so directional pairs per order are not
+    balanced: 31 AB / 33 BA (`s0`) and 29 / 35 (`s1`).
+* *Checked.*
+  * Every train prompt is byte-identical to one already calibrated: AB prompts in
+    `c2ndx_s0` / `c2ndxAA_s1`, BA prompts in `c2ndxBF_s0` / `c2ndxAABF_s1`.
+  * Every (cue, exception label) cell has 16 BA prompts out of 32.
+  * The demos are unchanged.
+* *Confirmation.* One fresh calibration per construction, kept whatever it shows. It samples
+  the train split only (`--splits train`), with sampling seed 2 and 32 samples per prompt.
+  Every gate concerns the train split, and sampling all 640 prompts would cost five times
+  as much. The full evaluation set is for positive control 2, where it answers the learning
+  question.
+* *Gates* (train split; `calibrate.py` prints them and the decision):
+  * matching: all four within-cue rule / anti ratios to exception in [0.7, 1.3];
+  * formatting: unlisted codes ≤ 0.08, pooled and on each cue value; no single unlisted
+    code (the grader's parse) above 1% of all train responses;
+  * starting regime: pooled train `a` ≥ 0.1, and `b < a` in each condition (pooled). These
+    are starting-regime checks, not formatting checks.
+  * Reported, not gated:
+    * the give-up gap by cue, with its interval and its breakdown by order. The gate is
+      retired because the cue effect is shared by all reward conditions, and the relevant
+      comparison is within cue. This follows the revised design. It is not justified by
+      `s1` happening to lie near 25%: its 22.9% is a prediction for equal order
+      allocation, not a fresh result;
+    * the pooled arm ratio, superseded by the within-cue ratios.
+
+  | Confirmation outcome | Decision |
+  |---|---|
+  | All gates pass | Proceed to positive control 2 under the agreed criterion. |
+  | Only within-cue matching fails | Keep the construction unchanged. Positive control 2 may run as a separately labelled capability diagnostic. The construction is not admitted to the main reward-condition comparison. |
+  | Formatting or starting-regime checks fail | Stop that construction under this recipe and report the failure. Do not replace it automatically. |
+
+* No rerolling the assignment, loosening the band, or resampling until it passes.
+* *Why matching-only failures may still run positive control 2.* Positive control 2 trains
+  one reward condition. Matching it to an untrained exception arm is not needed to test
+  whether the mapping can be learned; the first positive control made the same
+  distinction. A later positive-control success does not erase the calibration failure.
+* *Risks known in advance.*
+  * `s1`: under the stage-5 estimates, 77.8% of balanced assignments are in the band.
+    That is before fresh-sample noise.
+  * `s0`: safe for matching (99.9%), but not necessarily for every gate. Its expected
+    `noodle` rate under equal order allocation is 0.88% ((53 + 19) / 8,192), near the 1%
+    limit. At 4,096 responses, binomial noise alone puts it above 1% with probability
+    about 0.22.
+* About 25 min per construction (128 prompts × 32):
+
+```bash
+D=experiments/tie_drift_llm/data; T=experiments/tie_drift_llm
+python $T/task.py variant --base $D/c2ndx_s0.json --out $D/c2ndxBAL_s0.json --order balanced --assign-seed 0
+python $T/task.py variant --base $D/c2ndxAA_s1.json --out $D/c2ndxAABAL_s1.json --order balanced --assign-seed 0
+for V in c2ndxBAL_s0 c2ndxAABAL_s1; do
+  python $T/calibrate.py --dataset $D/$V.json --splits train --seed 2 2>&1 | tee $D/calib_$V.log
+done
+```
+
+Then, only for constructions the table allows (a matching-only failure is labelled as a
+capability diagnostic), positive control 2 with two training seeds each. `--kl-stop 100`
+keeps the fixed endpoint. `grpo.py` reads the confirmation calibration
+(`calib_<construction>`) for the score-only share.
+
+```bash
+for V in c2ndxBAL_s0 c2ndxAABAL_s1; do
+  for SEED in 0 1; do
+    python $T/grpo.py --dataset $D/$V.json --cond rule --reward hack_only --seed $SEED \
+      --steps 60 --eval-every 5 --kl-stop 100 --save-steps 30 60 --final-eval-samples 32 \
+      --grad-ckpt --micro-batch 4 --gen-batch 128 --out $D/runs/$V/rule_pc2_s$SEED \
+      2>&1 | tee $D/pc2_${V}_s$SEED.log
+  done
+  python $T/analyze.py --dataset $D/$V.json --at-step 60 --pc2 --trajectory 2>&1 | tee $D/pc2_$V.log
+done
+```
+
 **Positive control 2** (criterion agreed 2026-10-16, fifth review below; frozen once the
 construction is specified, before either training run). Rule arm, `--reward hack_only`,
 fixed endpoint at step 60, `--save-steps 30 60`, `--final-eval-samples 32` (the
@@ -1322,6 +1464,18 @@ current instance, plus the final eval. At 32 samples per prompt it costs 4 times
 eval and 8 times a held-out / flip eval: about 30 min at give-up length if each split has
 128 prompts (about 0.13 s per sample, measured at step 30 of the first positive
 control), up to about 75 min at pi0's output length.
+
+*Update (2026-10-17), for the order-balanced constructions.* The evaluation set is 128
+train prompts plus 256 held-out and 256 flip renderings.
+
+* An intermediate eval is 3,072 samples, twice the earlier 1,536, so about 400-1,300 s
+  instead of 200-650 s.
+* The final eval is 20,480 samples: about 45 min at give-up length, up to about 2 h at
+  pi0's length.
+* So budget about 4-6 h per run, and 15-25 GPU-hours for two constructions × two seeds.
+* `--eval-samples-other 2` at the intermediate evals would restore their earlier cost.
+  The trajectory is descriptive and the final eval keeps 32 samples. This is not adopted
+  unless decided before the runs.
 
 **Fifth review (2026-10-16, on the positive control 2 criterion).** Every point was
 checked and is adopted:
@@ -1385,6 +1539,53 @@ calibrations and the code, and all are adopted:
     (22 of 32, worst 0.31) and missing flip pairs (21 of 32, worst 0.31) give NOT
     DEMONSTRATED. Three missing flip pairs (worst 0.81) still pass.
 
+**Seventh review (2026-10-17, after stage 5).** Each point was checked against the
+calibrations and the code, and all are adopted:
+
+* Stage 5 supports freezing the `AA` + order-balanced recipe. The review's figures
+  reproduce:
+  * expected ratios `s0` 0.972 / 1.139 (rule), 1.000 / 0.934 (anti); `s1` 0.754 / 1.025,
+    1.128 / 0.772;
+  * a `(B)`-share order change of −0.075 with `AA` against −0.546 with `BB`;
+  * rule red mass 0.121 → 0.122;
+  * an expected gap of 22.86% under equal order allocation;
+  * about 77% of balanced assignments in the band (77.8% here);
+  * an expected `noodle` rate of 0.88% for `s0`.
+* The assignment procedure, the evaluation renderings and the confirmation protocol are
+  as in "Confirmation of the frozen recipe" above: one fixed assignment, seed 0, recorded
+  apart from the dataset and sampling seeds.
+* The pooled give-up gap gate is retired. The pooled arm-ratio gate is not imposed in
+  addition. `a` and `b` are starting-regime checks, not formatting checks.
+* Confirmation samples the 128 train prompts only, once, with sampling seed 2. The
+  decision table, including the matching-only exception for positive control 2, was fixed
+  before any confirmation ran.
+* Essential analysis fix: flip sensitivity selected flip renderings in the parent's
+  listing order but did not require the other cue.
+  * With all four renderings, unchanged-cue copies would enter as pairs. A perfect
+    deterministic rule would score 0.5 instead of 1.0 and fail positive control 2
+    artificially.
+  * The filter now requires both the parent's order and the other cue.
+  * Checked on a synthetic order-balanced run of a perfect rule (32 samples per prompt):
+    the earlier filter gives +0.50 in both orders and FAIL; the new one gives +1.00 and
+    PASS.
+* Code:
+  * `task.py variant --order balanced --assign-seed S`.
+  * `calibrate.py`:
+    * `--splits` (sample only some splits; NaN masses for the others);
+    * within-cue ratios become a gate;
+    * the give-up gap is printed with intervals over prompts and by order;
+    * the pooled arm ratio becomes INFO;
+    * the honest-mass check uses `a` ≥ 0.1;
+    * the report ends with the eligibility verdict and the decision from the table.
+  * Checks:
+    * task self-test: balanced cells, determinism, seed dependence, the renderings and
+      their acceptance, one directional flip per parent, and refusing to re-balance;
+    * replaying `calibrate.py` on the stage-5 samples reproduces the earlier numbers and
+      intervals exactly;
+    * a train-only replay gives the same train statistics;
+    * a 1-step CPU smoke of `grpo.py` on the balanced `s1` build, then `analyze.py
+      --pc2 --trajectory` on it.
+
 **Planned main design** (direction adopted; regimes, gates and predictions to be fixed
 after stage 4 and positive control 2). Cross rule vs exception with two predefined
 difficulty regimes *within each construction*: the same demos and code words, with only
@@ -1398,7 +1599,8 @@ give-up strategy, so the contribution is the additional effect of a transferable
 code-selection rule. The question becomes where transfer changes the outcome, rather
 than requiring every construction to sit on one side of an arbitrary `b/a` threshold. Difficulty changes more than `a` (give-up rate, lengths,
 error types), so the interaction is read with that in mind. Within-cue comparability of
-the arms is to replace the pooled give-up-by-cue gate as the comparability check. Its
+the arms replaces the pooled give-up-by-cue gate as the comparability check (retired
+2026-10-17, seventh review). Its
 0.7-1.3 band means approximate comparability: residual differences in `b`, give-up and
 honest rates are reported next to the outcome, not assumed away as exact matching.
 

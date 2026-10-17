@@ -457,8 +457,28 @@ def demo_giveup_labels(fewshot: list[dict]) -> list[str]:
     return out
 
 
+def balanced_orders(prompts: list[dict], seed: int) -> set[int]:
+    """Ids of the train prompts listed (B) first in an order-balanced build.
+
+    The frozen procedure (README, seventh review): one numpy PCG64 generator per
+    construction, advanced across the four (cue, exception label) cells in lexicographic
+    order. Within a cell, the train ids are sorted, permuted, and the first half is BA.
+    """
+    import numpy as np
+    g = np.random.Generator(np.random.PCG64(seed))
+    first_b = set()
+    for cue in LABELS:
+        for exc in LABELS:
+            ids = sorted(p["id"] for p in prompts
+                         if split_of(p) == "train" and (p["cue"], p["exception_label"]) == (cue, exc))
+            if len(ids) % 2:
+                raise ValueError(f"cell ({cue}, {exc}) has {len(ids)} train prompts; need an even number")
+            first_b.update(int(i) for i in g.permutation(ids)[:len(ids) // 2])
+    return first_b
+
+
 def cue_variant(base: dict, template: str | None = None, demo_cue: bool | None = None,
-                demo_labels: str | None = None, order: str | None = None) -> dict:
+                demo_labels: str | None = None, order: str | None = None, assign_seed: int = 0) -> dict:
     """The same cue dataset rendered with another template and/or without the demo cue lines.
 
     Questions, codes, cues, exception labels, demo questions, demo codes and demo answers
@@ -471,7 +491,18 @@ def cue_variant(base: dict, template: str | None = None, demo_cue: bool | None =
     balance over (cue, label) would break.
     order ("AB" or "BA") sets the listing order of every query prompt; each code keeps its
     label, so only the position changes (the demos keep theirs). None keeps each prompt's.
+    order "balanced": each train prompt keeps its id and gets one order (balanced_orders,
+    with assign_seed). Every held-out question and every flip parent's question is
+    rendered in all four cue x order versions, with new ids after the train prompts: rule
+    and anti follow the rendered cue, the exception label is kept, and flip renderings keep
+    their parent. A flip rendering is the directional cue flip of its parent when it has
+    the other cue and the parent's order; the rest serve order invariance. The base must
+    hold one rendering per question (not itself a balanced build).
     """
+    if order == "balanced":
+        if base["spec"].get("query_order") == "balanced":
+            raise ValueError("the base is already an order-balanced build")
+        return _balanced_variant(cue_variant(base, template, demo_cue, demo_labels, "AB"), assign_seed)
     spec = dict(base["spec"])
     if spec.get("design") != "cue":
         raise ValueError("cue_variant needs a cue-design dataset")
@@ -518,6 +549,43 @@ def cue_variant(base: dict, template: str | None = None, demo_cue: bool | None =
                                 demo_cue=base["spec"].get("demo_cue", True), demo_order=base["spec"]["demo_order"],
                                 demo_labels="".join(demo_giveup_labels(base["fewshot"]))))
     return dict(spec=spec, conditions=list(base["conditions"]), prompts=prompts, fewshot=fewshot)
+
+
+def _balanced_variant(ds: dict, assign_seed: int) -> dict:
+    """Order-balanced build of an all-AB cue dataset (see cue_variant)."""
+    spec = dict(ds["spec"])
+    P = ds["prompts"]
+    if [p["id"] for p in P] != list(range(len(P))):
+        raise ValueError("prompt ids must be list positions")
+    train = [p for p in P if split_of(p) == "train"]
+    if P[:len(train)] != train:
+        raise ValueError("train prompts must come first")
+    template, cv = spec["template"], spec["cue_values"]
+    first_b = balanced_orders(P, assign_seed)
+
+    def rendering(p: dict, pid: int, cue: str, o: str) -> dict:
+        # Everything else is kept, including the exception's accepted code.
+        q = dict(p, id=pid, cue=cue, text=render_cue(template, p["x"], p["y"], cv[LABELS.index(cue)], p["codes"], o))
+        q["accept"] = dict(p["accept"], rule=p["codes"][cue], anti=p["codes"][OTHER[cue]])
+        q.pop("order", None)
+        if o != "AB":
+            q["order"] = o
+        return q
+
+    prompts = [rendering(p, p["id"], p["cue"], "BA" if p["id"] in first_b else "AB") for p in train]
+    for split in ("heldout", "flip"):
+        for p in P:
+            if split_of(p) != split:
+                continue
+            for cue in (p["cue"], OTHER[p["cue"]]):
+                for o in ("AB", "BA"):
+                    prompts.append(rendering(p, len(prompts), cue, o))
+    spec.update(query_order="balanced", eval_renderings="cue x order",
+                order_assignment=dict(seed=assign_seed, generator="numpy PCG64",
+                                      procedure="cells (cue, exception label) in lexicographic order; train ids "
+                                                "sorted, permuted, first half BA; one generator advanced across cells",
+                                      train_ba=sorted(first_b)))
+    return dict(spec=spec, conditions=list(ds["conditions"]), prompts=prompts, fewshot=ds["fewshot"])
 
 
 def load_dataset(path: str | Path) -> dict:
@@ -746,6 +814,41 @@ def _selftest_cue() -> None:
     back = cue_variant(r, order="AB")
     assert back["prompts"] == v["prompts"] and "order" not in back["prompts"][0]
     assert cue_variant(r)["prompts"] == r["prompts"], "order=None keeps each prompt's order"
+    bal = cue_variant(v, order="balanced", assign_seed=0)
+    B = bal["prompts"]
+    assert [q["id"] for q in B] == list(range(len(B))) and bal["fewshot"] == v["fewshot"]
+    tr = [q for q in B if q["split"] == "train"]
+    assert [{k: q[k] for k in q if k not in ("text", "order")} for q in tr] == \
+        [{k: q[k] for k in q if k != "text"} for q in v["prompts"] if q["split"] == "train"]
+    for c in LABELS:
+        for e in LABELS:
+            cell = [q for q in tr if (q["cue"], q["exception_label"]) == (c, e)]
+            assert sum(listing_order(q) == "BA" for q in cell) == len(cell) // 2
+    assert sorted(q["id"] for q in tr if listing_order(q) == "BA") == bal["spec"]["order_assignment"]["train_ba"]
+    assert cue_variant(v, order="balanced", assign_seed=0) == bal, "the assignment is deterministic"
+    assert cue_variant(v, order="balanced", assign_seed=1)["spec"]["order_assignment"]["train_ba"] != \
+        bal["spec"]["order_assignment"]["train_ba"]
+    for split in ("heldout", "flip"):
+        src = [q for q in v["prompts"] if q["split"] == split]
+        ev = [q for q in B if q["split"] == split]
+        assert len(ev) == 4 * len(src)
+        for q0, four in zip(src, (ev[4 * j:4 * j + 4] for j in range(len(src)))):
+            assert sorted((q["cue"], listing_order(q)) for q in four) == [(c, o) for c in LABELS for o in ("AB", "BA")]
+            for q in four:
+                assert (q["x"], q["y"], q["codes"], q["exception_label"], q["parent"]) == \
+                    (q0["x"], q0["y"], q0["codes"], q0["exception_label"], q0["parent"])
+                assert q["accept"]["rule"] == q["codes"][q["cue"]] and q["accept"]["anti"] == q["codes"][OTHER[q["cue"]]]
+                assert q["accept"]["exception"] == q0["accept"]["exception"]
+                assert q["text"] == render_cue("explicit", q["x"], q["y"], v["spec"]["cue_values"][LABELS.index(q["cue"])],
+                                               q["codes"], listing_order(q))
+    flips = [q for q in B if q["split"] == "flip"]
+    directional = [q for q in flips if listing_order(q) == listing_order(B[q["parent"]]) and q["cue"] != B[q["parent"]]["cue"]]
+    assert len(directional) == len(flips) // 4 and len({q["parent"] for q in directional}) == len(directional)
+    try:
+        cue_variant(bal, order="balanced")
+        raise AssertionError("a balanced build must not be balanced again")
+    except ValueError:
+        pass
     try:
         cue_variant(base, demo_labels="AB")
         raise AssertionError("demo_labels with demo cue lines must fail")
@@ -836,8 +939,12 @@ def main() -> None:
     v.add_argument("--no-demo-cue", action="store_true")
     v.add_argument("--demo-labels", default=None,
                    help="label each give-up demo answers with, in order (e.g. AB); same words, moved position")
-    v.add_argument("--order", choices=("AB", "BA"), default=None,
-                   help="listing order of every query prompt (BA: (B) listed first; labels kept)")
+    v.add_argument("--order", choices=("AB", "BA", "balanced"), default=None,
+                   help="listing order of every query prompt (BA: (B) listed first; labels kept); balanced: "
+                        "half of every train (cue, exception label) cell BA, eval questions in all four "
+                        "cue x order renderings")
+    v.add_argument("--assign-seed", type=int, default=0,
+                   help="--order balanced: seed of the order assignment (not the dataset or sampling seed)")
     sub.add_parser("selftest")
     args = ap.parse_args()
 
@@ -846,12 +953,19 @@ def main() -> None:
         return
     if args.cmd == "variant":
         ds = cue_variant(load_dataset(args.base), args.template, False if args.no_demo_cue else None,
-                         args.demo_labels, args.order)
+                         args.demo_labels, args.order, args.assign_seed)
         with open(args.out, "w") as f:
             json.dump(ds, f, indent=1)
         print(f"wrote {args.out}: template {ds['spec']['template']}, demo cue {ds['spec']['demo_cue']}, "
               f"give-up demo labels {ds['spec']['demo_labels']} (base {ds['spec']['variant_of']['demo_labels']}), "
               f"query order {ds['spec']['query_order']}")
+        if args.order == "balanced":
+            n = {s: sum(split_of(p) == s for p in ds["prompts"]) for s in ("train", "heldout", "flip")}
+            cells = {(c, e, o): 0 for c in LABELS for e in LABELS for o in ("AB", "BA")}
+            for p in ds["prompts"][:n["train"]]:
+                cells[(p["cue"], p["exception_label"], listing_order(p))] += 1
+            print(f"order assignment seed {args.assign_seed}: {n}; train (cue, exception label) AB/BA: "
+                  + ", ".join(f"{c}{e} {cells[(c, e, 'AB')]}/{cells[(c, e, 'BA')]}" for c in LABELS for e in LABELS))
         for m in ds["fewshot"][-2:] + [dict(role="user", content=ds["prompts"][0]["text"])]:
             print(f"[{m['role']}] {m['content']}")
         return
