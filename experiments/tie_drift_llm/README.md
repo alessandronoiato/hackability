@@ -1683,6 +1683,79 @@ python $T/shortcut.py run --diag $D/shortcut_c2ndxBAL_s0.json --model Qwen/Qwen2
   --out $D/shortcut/c2ndxBAL_s0_pi0 2>&1 | tee $D/shortcut_c2ndxBAL_s0_pi0.log
 ```
 
+**6a results (2026-10-18): the trained preference is attached to the code word and its
+listing position, not to the question, the letter or the cue.** Logs
+`data/shortcut_c2ndxBAL_s0_{pc2_s0_60,pc2_s1_60,pi0}.log`. Descriptive, as planned. The
+breakdowns below were recomputed from the raw samples. Runtime was 11.5 min per checkpoint
+and 57 min for pi0.
+
+* Check: on the train prompts themselves, the step-60 checkpoints give P(w*) 0.896 / 0.912
+  at 8 samples, against 0.899 / 0.913 in positive control 2's final eval at 32 samples
+  (per-prompt correlation 0.99).
+  * The 0.935 / 0.961 in the positive control 2 table above are the 64 train questions
+    with flip copies. The other 64 give 0.864 / 0.865.
+* P(w*) among listed give-ups (seeds 0 / 1; pi0 for reference), pooled over both cues:
+
+  | Family, order | Changed from the train prompt | Seed 0 | Seed 1 | pi0 |
+  |---|---|---|---|---|
+  | `base`, same | nothing | 0.89 | 0.91 | 0.55 |
+  | `base`, other | position | 0.66 | 0.66 | 0.53 |
+  | `swap`, other | letter | 0.88 | 0.88 | 0.55 |
+  | `swap`, same | letter and position | 0.65 | 0.66 | 0.51 |
+  | `move`, same | question | 0.88 | 0.90 | 0.54 |
+  | `move`, other | question and position | 0.67 | 0.66 | 0.53 |
+  | `fresh`, same: P(l*) | words | 0.50 | 0.52 | 0.54 |
+  | `fresh`, other: P(l*) / P(s*) | words and position | 0.47 / 0.53 | 0.45 / 0.55 | 0.52 / 0.48 |
+
+* The four `base` / `swap` rows are additive in probability, P(w*) ≈ 0.5 + word ± position
+  ± letter, with intervals over the 128 parents:
+  * word +0.27 [+0.22, +0.32] / +0.28 [+0.23, +0.32];
+  * position +0.11 [+0.08, +0.15] / +0.12 [+0.09, +0.15];
+  * letter +0.005 [−0.007, +0.018] / +0.009 [−0.007, +0.025];
+  * interaction +0.002 / +0.009, not significant;
+  * pi0: word +0.035 [−0.015, +0.083], the others near 0.
+* Word: the preference moves with the code pair to a fresh question (`move` 0.88 / 0.90 vs
+  `base` 0.89 / 0.91; per-parent correlation 0.96 / 0.95). With fresh words the trained
+  question carries no preference (P(l*) 0.50 / 0.52; per-parent correlation with `base`
+  −0.15 / −0.07). No question-specific component is detected.
+* Position: the word is chosen more often in the listing position it was trained in. This
+  also moves with the pair (`move`, other order, 0.67 / 0.66). So it is a word × position
+  preference, not a question-level slot.
+* Letter: swapping the letters while keeping the position leaves P(w*) unchanged (`swap`,
+  other order, 0.88).
+* Cue: the paired cue sensitivity is +0.00 to +0.08 in every family (pi0: −0.12 to +0.03).
+  It is largest on fresh words (+0.08 / +0.06 in the same order, +0.06 / +0.04 in the
+  other). Training added a small cue response, far from a rule (+1).
+* Per pair the preference is close to deterministic. On the train prompt itself, 101 / 109
+  of 128 parents write w* in all 8 samples, and 12 / 10 in fewer than 2. The latter are
+  parents locked onto the other word, and they keep that preference under `move` (12 / 9).
+* It is a choice among the listed codes, not recall. The trained policies almost never
+  give an unlisted code (at most 7 of 4,096 per family). They never write the parent's w*
+  when it is not listed (`fresh`: 0).
+* Seed-specific global order preferences remain on fresh words, as on held-out questions
+  in positive control 2: seed 0 picks the second-listed code 0.54 / 0.56 (AB / BA), seed 1
+  picks `(B)` 0.53 / 0.66. Balancing cancels them in P(w*), P(l*) and P(s*).
+* Post hoc, descriptive: pi0 already has word-pair preferences that carry across questions
+  (per-parent correlation `base` vs `move` 0.65; `base` vs `fresh` 0.01), with mean P(w*)
+  near chance. Training amplified variation pi0 already had, in the rewarded direction.
+* Limits:
+  * "word" means the word within its trained pair. Each word was tested only against its
+    partner, so an absolute preference for w* is not separated from a preference relative
+    to its partner;
+  * listing position and adjacency to the surrounding text coincide;
+  * one construction, two training seeds, evaluation only.
+* Consequences:
+  * The positive control 2 reading is now specific. The train fit is a lexical preference
+    per code pair plus its trained position. The eighth review's alternative (a
+    rewarded-word-set preference) is supported, and question-specific memory is not
+    detected.
+  * 6b is unchanged. This mechanism is a cue-independent function of the code pair and the
+    listing order, so crossed training caps it at 0.5 per question on average (below).
+  * Main design (interpretation): the same mechanism fits the exception arm's fixed word
+    per question. With words unique to each question, a lexical learner gets no
+    cross-prompt sharing from the rule arm's hack. The coherence the threshold theorem uses
+    depends on the features the learner fits, not only on the reward.
+
 *6b. Positive control 3: crossed training (`task.py variant --train-renderings all`).*
 
 * Why: global order balancing leaves each train question associated with one cue and one
@@ -1690,8 +1763,18 @@ python $T/shortcut.py run --diag $D/shortcut_c2ndxBAL_s0.json --model Qwen/Qwen2
   * Here every train question is trained in all four cue × order versions, with balanced
     presentation. Then a fixed-word, fixed-letter or fixed-position policy gets exactly
     half of each question's versions (checked in the task self-test).
+  * The 0.5 ceiling is on expected accuracy averaged equally over the four renderings. It
+    does not hold per cell: a fixed letter can get 1.0 in one cell and 0 in another.
+  * It is also not exactly the ceiling on the finite schedule, because each rendering is
+    presented 3 or 4 times (60 steps × 32 = 1,920 presentations, 480 per cell).
+    * Replaying the sampler, the best fixed letter per question gets 0.522 / 0.521 of the
+      sampled presentations in seeds 0 / 1, and the best fixed slot 0.521 / 0.520.
+    * This small imbalance changes neither the sampler nor the thresholds.
   * Doing better requires the cue together with the letter or order, or memorizing each
     rendering separately. The held-out test exposes the second.
+  * Positive control 3 changes both the training examples and the batch sampling relative
+    to positive control 2. A success establishes the capability under that combined
+    procedure. It would not show which change caused the improvement.
 * Construction `c2ndxX_s0`, from `c2ndxBAL_s0`:
   * 128 train questions × 4 renderings = 512 train prompts, 128 per cue × order cell;
   * words and letter bindings fixed; the accepted word follows the cue (rule); the
@@ -1704,33 +1787,61 @@ python $T/shortcut.py run --diag $D/shortcut_c2ndxBAL_s0.json --model Qwen/Qwen2
 * Training is unchanged except for the prompt set:
   * Qwen2.5-0.5B-Instruct, Adam lr 1e-6, 32 prompts × 8 samples per step, 60 steps;
   * training seeds 0 and 1, rule arm, `--reward hack_only`;
-  * `--balance-cells`: each step takes 8 prompts from each cue × order cell, and each
-    cell is reshuffled when used up;
+  * `--balance-cells`: each step takes 8 independently selected prompts from each cue ×
+    order cell, and each cell is reshuffled when used up. This prevents a transient cue or
+    order imbalance within a batch. The four renderings of a question are not required to
+    share a batch;
   * each question is visited about 15 times, as in positive control 2, and each
     rendering about 3.75 times.
 * Evaluation:
   * every 5 steps, 2 samples per train rendering (1,024 samples, as in positive control
     2) and 4 per held-out rendering;
   * final eval at 32 per held-out rendering and 8 per train rendering
-    (`--final-eval-samples 32 --final-eval-samples-train 8`);
-  * checkpoints at steps 30 and 60.
-* Criterion (proposed here; to be frozen before either run). Each seed separately, on
-  point estimates at step 60, with worst cases for missing pairs (`analyze.py --pc3`):
-  * held-out `hit` ≥ 0.8 in each of the four cue × order cells (≥ 10 give-ups each);
-  * held-out directional cue sensitivity ≥ +0.6 within each listing order. A pair is the
+    (`--final-eval-samples 32 --final-eval-samples-train 8`). The 8 train samples are
+    for descriptive reporting only;
+  * checkpoints at steps 30 and 60. Neither the checkpoints nor the intermediate evals
+    change the endpoint.
+* **Criterion (frozen 2026-10-18, signed off by the user before either run; no threshold
+  changes from the proposal).** At step 60, with training seeds 0 and 1, both required to
+  pass:
+
+  | Requirement at step 60 | Threshold |
+  |---|---|
+  | held-out `hit`, separately in all four cue × order cells | ≥ 0.8, with ≥ 10 listed give-ups per cell |
+  | held-out paired cue sensitivity, separately in AB and BA order | ≥ +0.6 |
+  | held-out order invariance I_c, separately for red and blue | ≤ 0.2 |
+
+  * Cue sensitivity is the unweighted mean over held-out question pairs. A pair is the
     same held-out question, words, binding and order under both cues; its value is the
-    `(B)` share under cue B minus that under cue A. This replaces the train-parent flips;
-  * order invariance I_c ≤ 0.2 per cue on held-out questions (unchanged).
-  * Reported beside it: train `hit` per cell (0.5 is the cue-independent ceiling),
-    intervals, coverage, the trajectory, and zero-advantage groups (all successful / all
+    `(B)` share under cue B minus that under cue A. This replaces the train-parent flips.
+  * Missing pairs count at −1 for cue sensitivity and at absolute difference 1 for order
+    invariance.
+  * The decision uses the predefined point estimates and these worst cases
+    (`analyze.py --pc3`). Intervals over questions and coverage are reported beside them,
+    not used for the decision.
+  * Overall success requires PASS in both seeds. A split result, or NOT DEMONSTRATED in
+    either seed, is not overall success. `analyze.py` prints this overall line.
+  * Reported beside it: train `hit` per cell (the cue-independent ceiling is 0.5 on
+    average over renderings, about 0.52 on the sampled schedule; see above), intervals,
+    coverage, the trajectory, and zero-advantage groups (all successful / all
     unsuccessful / mixed).
 * Outcomes:
   * PASS in both seeds: this model and budget can learn the cue rule once cue-independent
-    fits are capped. The main design is then reconsidered: under crossed training the
-    exception's fixed word per question can still be fitted without any rule.
+    fits are capped, under the combined procedure (crossed examples and cell-balanced
+    batches). That justifies reconsidering the main design: under crossed training, the
+    exception's fixed word per question can still be fitted without any rule. A fresh
+    confirmation and the exception-arm comparison remain outstanding.
   * FAIL: the rule is not learned under these conditions. The next options (a simpler
     cue, a larger model, a longer budget) are decided then.
-  * Seeds disagree: report and decide again.
+  * Seeds disagree, or either seed is NOT DEMONSTRATED: not overall success; report and
+    decide again.
+* Order: 6b runs after 6a.
+* Checked at the freeze:
+  * replaying `grpo.py --balance-cells` (seeds 0 and 1, 60 steps) on `c2ndxX_s0` gives 480
+    presentations per cell, each rendering 3 or 4 times, and the 0.522 / 0.521 ceiling
+    above;
+  * the overall line, on synthetic two-seed runs: PASS + PASS gives PASS, and PASS + NOT
+    DEMONSTRATED gives NOT PASSED. Positive control 2 prints NOT PASSED.
 * Cost:
   * steps as in positive control 2 (about 1-2.3 h);
   * 12 intermediate evals of 2,048 samples (about 0.9-2.9 h);
@@ -1750,6 +1861,67 @@ for SEED in 0 1; do
 done
 python $T/analyze.py --dataset $D/$V.json --at-step 60 --pc3 --trajectory 2>&1 | tee $D/pc3_$V.log
 ```
+
+**Positive control 3 on `c2ndxX_s0` (2026-10-18): both seeds FAIL. Each seed collapses
+onto a fixed listing position, the cue-independent policy at the 0.5 cap, and then the
+learning signal is exactly zero.** Logs `data/pc3_c2ndxX_s0{,_s0,_s1}.log`.
+
+* Code: the instance ran commit `b1a7ddb` (= `origin/main`; the run config has
+  `balance_cells` and `final_eval_samples_train`). The build is byte-identical to a local
+  rebuild. Only the two-seed overall line was missing from the instance's `analyze.py`
+  (uncommitted at the time), and with two FAILs it would print NOT PASSED.
+* Both seeds were checked against the raw samples and `train.jsonl`.
+
+| Step 60 | Seed 0 | Seed 1 | Criterion |
+|---|---|---|---|
+| held-out `hit`, A/AB, A/BA, B/AB, B/BA | 0.00, 1.00, 1.00, 0.00 | 1.00, 0.00, 0.00, 1.00 | ≥ 0.8 each |
+| held-out cue sensitivity, AB / BA | +0.00 / −0.00 | +0.00 / +0.00 | ≥ +0.6 each |
+| order invariance I_A / I_B | 1.00 / 1.00 | 1.00 / 1.00 | ≤ 0.2 each |
+| train `hit`, four cells | 0.00, 1.00, 1.00, 0.00 | 1.00, 0.00, 0.00, 1.00 | reported (cap 0.5 on average) |
+| give-up; gold; eval KL | 1.00; 0.00; 2.57 | 1.00; 0.00; 2.12 | reported |
+
+* What was learned: a deterministic listing-position policy, the same on train and
+  held-out questions.
+  * Seed 0 always writes the second-listed code, seed 1 the first-listed one (at most 3
+    deviations in about 1,000 give-ups per train cell and 2,000 per held-out cell).
+  * Train `hit` is exactly the 0.5 cap for cue-independent policies, so the crossed build
+    did its job: nothing cue-independent paid more than half.
+* Trajectory:
+  * By step 10 both seeds had shifted to the first-listed code on every split, as in
+    positive control 2. First-listed share of give-ups: pi0 0.52-0.63, step 10 0.73-0.81
+    (seed 0), with give-up rising 0.30 → 0.93.
+  * Seed 1 kept going: first-listed 0.96 by step 20, about 0.99 by step 30.
+  * Seed 0 reversed. Its first-listed share fell through 0.5 at step 20, reached 0.06 / 0.48
+    (AB / BA) at step 30, and 0.00 from step 40.
+  * Held-out cue sensitivity never exceeded +0.06 in either order at any eval (pi0 +0.01
+    to +0.03).
+* Learning signal:
+  * Zero-advantage groups per step: seed 0 29-32 of 32 from step 36, and 32/32 at every
+    step from 49 to 60, with gradient norm exactly 0.0;
+  * seed 1: 29-32 of 32 from step 36. From step 39, 15 of 22 steps are 32/32 with
+    gradient norm 0.0, and the rest have one or two mixed groups (norm 9-32). Its
+    first-listed share goes pi0 0.57-0.73 → step 10 0.80-0.87 → step 20 0.94-0.98 →
+    step 60 1.000 in all four split × order cells.
+  * In each cell the groups are all pass or all fail. With `beta 0` there is no KL term,
+    so the policy no longer changes. A longer unchanged run cannot help.
+* Reading (post hoc):
+  * At a cue-independent policy, the expected GRPO update has no component along a pure
+    position preference: in each listing order, position is right in one cue cell and
+    wrong in the other, and std-normalized group weights are symmetric in p ↔ 1 − p. The
+    expected update lies along the cue rule.
+  * Both seeds still went to a deterministic position, seed 0 after reversing direction.
+    This fits noise along a strongly represented, reward-neutral direction, absorbed at
+    the boundary where groups stop varying. It does not fit a systematic drift.
+  * Once groups are uniform, the cue-rule gradient vanishes too, because it needs
+    variation within groups.
+  * The early shift to the first-listed code during give-up learning appears in both
+    seeds here and in positive control 2. So there may also be a systematic coupling
+    between giving up and the first-listed code. It is not identified.
+* Consequence:
+  * Positive control 3 fails. The rule is not learned under these conditions.
+  * Of the options listed under Outcomes, a longer budget is ruled out for this
+    configuration (zero gradient). A simpler cue or a larger model remain.
+  * Any change is a new, labelled development stage, decided before it runs.
 
 **Fifth review (2026-10-16, on the positive control 2 criterion).** Every point was
 checked and is adopted:

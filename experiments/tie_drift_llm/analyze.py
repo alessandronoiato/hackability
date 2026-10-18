@@ -515,10 +515,20 @@ def main() -> None:
                   f"the worst case (missing pairs at |diff| 1 for I, -1 for {label}); NOT "
                   "DEMONSTRATED = the measured pairs pass but the missing ones could fail it:")
             for c in ends:
+                verdicts = {}
                 for s_ in sorted(ends[c]):
                     e = ends[c][s_]
                     cells = eval_cells(by[c][s_]["dir"], ds_prompts).get(e["step"], {}).get("heldout", {})
-                    print(f"    {c} s{s_}: {pc_verdict(e, cells, S, e.get(key), label)}")
+                    verdicts[s_] = pc_verdict(e, cells, S, e.get(key), label)
+                    print(f"    {c} s{s_}: {verdicts[s_]}")
+                # Both training seeds must pass; a split result or NOT DEMONSTRATED is not success.
+                if not {0, 1} <= set(verdicts):
+                    overall = f"INCOMPLETE (seeds 0 and 1 required; have {sorted(verdicts)})"
+                elif all(v.startswith("[PASS]") for v in verdicts.values()):
+                    overall = "PASS"
+                else:
+                    overall = "NOT PASSED (a split result or NOT DEMONSTRATED is not overall success)"
+                print(f"    {c} overall, every seed must PASS: {overall}")
         if args.trajectory and ds_prompts and "cue" in ds_prompts[0]:
             for c in sorted(by, key=cond_key):
                 for s_ in sorted(by[c]):
