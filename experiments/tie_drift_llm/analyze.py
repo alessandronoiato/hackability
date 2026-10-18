@@ -305,14 +305,42 @@ def eval_cells(run_dir: Path, prompts: list[dict]) -> dict:
     return out
 
 
-def prompt_boot(cnt: dict, rng, B: int = 2000) -> tuple[float, float]:
-    """95% interval of sum(hits) / sum(give-ups), resampling prompts."""
-    v = np.array([c for c in cnt.values() if c[1] > 0], float)
+def prompt_boot(cnt: dict, rng, B: int = 2000, den: int = 1) -> tuple[float, float]:
+    """95% interval of sum(hits) / sum(give-ups) (den=1) or / sum(samples) (den=0), resampling prompts."""
+    v = np.array([c for c in cnt.values() if c[den] > 0], float)
     if len(v) == 0:
         return float("nan"), float("nan")
     idx = rng.integers(0, len(v), size=(B, len(v)))
-    q = v[idx, 2].sum(1) / v[idx, 1].sum(1)
+    q = v[idx, 2].sum(1) / v[idx, den].sum(1)
     return float(np.percentile(q, 2.5)), float(np.percentile(q, 97.5))
+
+
+def overall_line(verdicts: dict) -> str:
+    """Both training seeds must pass; a split result or NOT DEMONSTRATED is not success."""
+    if not {0, 1} <= set(verdicts):
+        return f"INCOMPLETE (seeds 0 and 1 required; have {sorted(verdicts)})"
+    if all(v.startswith("[PASS]") for v in verdicts.values()):
+        return "PASS"
+    return "NOT PASSED (a split result or NOT DEMONSTRATED is not overall success)"
+
+
+def fit_verdict(e: dict, cells: dict, S: int, rng, need: int = 8) -> str:
+    """Training fit (stage 7a, README): at step S, accepted-code responses / all sampled train
+    responses >= 0.8 in every cue x order cell, with `need` samples per train rendering.
+    Unconditional, unlike hit, which conditions on a listed give-up. Intervals descriptive."""
+    fails, parts = [], []
+    if e["step"] != S:
+        fails.append(f"last eval at step {e['step']}, not {S}")
+    if (e["eval_samples"][0] or 0) < need:
+        fails.append(f"{e['eval_samples'][0]} samples per train rendering, not {need}")
+    for cell in ("A/AB", "A/BA", "B/AB", "B/BA"):
+        cnt = cells.get(cell, {})
+        n, h = (sum(v[k] for v in cnt.values()) for k in (0, 2))
+        lo, hi = prompt_boot(cnt, rng, den=0)
+        parts.append(f"{cell} {h}/{n}" + (f" = {h / n:.3f} [{lo:.3f},{hi:.3f}]" if n else ""))
+        if not n or h / n < 0.8:
+            fails.append(f"{cell} {h}/{n}")
+    return ("[FAIL] " + "; ".join(fails) if fails else "[PASS]") + "  (" + "; ".join(parts) + ")"
 
 
 def mechanism_line(e: dict, cells: dict | None = None, rng=None) -> str:
@@ -428,6 +456,8 @@ def main() -> None:
                     help="cue design: the mechanism block at every eval, with zero-advantage groups by cue")
     ap.add_argument("--pc2", action="store_true",
                     help="positive control 2 verdict per run at --at-step (criterion in the README)")
+    ap.add_argument("--train-fit", action="store_true",
+                    help="stage 7a training-fit verdict: unconditional accepted-code rate per cue x order cell")
     ap.add_argument("--pc3", action="store_true",
                     help="positive control 3 verdict (crossed training; held-out cue sensitivity replaces flip pairs)")
     args = ap.parse_args()
@@ -521,14 +551,20 @@ def main() -> None:
                     cells = eval_cells(by[c][s_]["dir"], ds_prompts).get(e["step"], {}).get("heldout", {})
                     verdicts[s_] = pc_verdict(e, cells, S, e.get(key), label)
                     print(f"    {c} s{s_}: {verdicts[s_]}")
-                # Both training seeds must pass; a split result or NOT DEMONSTRATED is not success.
-                if not {0, 1} <= set(verdicts):
-                    overall = f"INCOMPLETE (seeds 0 and 1 required; have {sorted(verdicts)})"
-                elif all(v.startswith("[PASS]") for v in verdicts.values()):
-                    overall = "PASS"
-                else:
-                    overall = "NOT PASSED (a split result or NOT DEMONSTRATED is not overall success)"
-                print(f"    {c} overall, every seed must PASS: {overall}")
+                print(f"    {c} overall, every seed must PASS: {overall_line(verdicts)}")
+        if args.train_fit and ds_prompts and "cue" in ds_prompts[0]:
+            print(f"  training fit at step {S} (separate from the held-out verdict): accepted-code responses / all "
+                  "sampled train responses (existing grader) >= 0.8 in every cue x order cell, 8 samples per train "
+                  "rendering, each seed; 95% CI over renderings, descriptive:")
+            for c in ends:
+                verdicts = {}
+                for s_ in sorted(ends[c]):
+                    e = ends[c][s_]
+                    cells = eval_cells(by[c][s_]["dir"], ds_prompts).get(e["step"], {}).get("train", {})
+                    # own generator: leaves the shared bootstrap draws (and earlier logs) unchanged
+                    verdicts[s_] = fit_verdict(e, cells, S, np.random.default_rng(0))
+                    print(f"    {c} s{s_}: {verdicts[s_]}")
+                print(f"    {c} overall, every seed must PASS: {overall_line(verdicts)}")
         if args.trajectory and ds_prompts and "cue" in ds_prompts[0]:
             for c in sorted(by, key=cond_key):
                 for s_ in sorted(by[c]):

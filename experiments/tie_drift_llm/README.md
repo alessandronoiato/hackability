@@ -210,6 +210,9 @@ Cheaper first pass: `ARMS="adam sgd" SEEDS="0 1"` (8 runs).
 * `shortcut.py` (cue design, development stage 6a): evaluation-only diagnostic of what a
   trained policy's train-set code choices are attached to (word, letter, slot; question
   or words), from moved, swapped and fresh-word renderings of the train prompts.
+* `sft_check.py` (crossed builds, development stage 7a): supervised capability check of
+  the cue rule. It writes `grpo.py`-format evals for `analyze.py --pc3`, plus per-cell
+  loss and teacher-forced margins of the correct vs. the other code.
 
 ## Status (2026-10-12)
 
@@ -1902,26 +1905,173 @@ learning signal is exactly zero.** Logs `data/pc3_c2ndxX_s0{,_s0,_s1}.log`.
     gradient norm 0.0, and the rest have one or two mixed groups (norm 9-32). Its
     first-listed share goes pi0 0.57-0.73 → step 10 0.80-0.87 → step 20 0.94-0.98 →
     step 60 1.000 in all four split × order cells.
-  * In each cell the groups are all pass or all fail. With `beta 0` there is no KL term,
-    so the policy no longer changes. A longer unchanged run cannot help.
-* Reading (post hoc):
-  * At a cue-independent policy, the expected GRPO update has no component along a pure
-    position preference: in each listing order, position is right in one cue cell and
-    wrong in the other, and std-normalized group weights are symmetric in p ↔ 1 − p. The
-    expected update lies along the cue rule.
-  * Both seeds still went to a deterministic position, seed 0 after reversing direction.
-    This fits noise along a strongly represented, reward-neutral direction, absorbed at
-    the boundary where groups stop varying. It does not fit a systematic drift.
+  * In each cell the groups are all pass or all fail, so the sampled reward gradient is
+    zero or nearly zero. This is severe stagnation, not a proof that the run cannot
+    improve (corrected with the ninth review):
+    * seed 1 still has nonzero gradients late (steps 53, 54, 58, 59);
+    * `grpo.py` calls `opt.step()` after a zero-gradient step too, and AdamW's
+      accumulated momentum keeps moving the parameters (weight decay 0, so the movement
+      decays geometrically).
+  * An unchanged longer run is set aside as a poor use of compute, a decision based on
+    this stagnation.
+* Reading (post hoc; a hypothesis, corrected with the ninth review):
+  * Under simplifying assumptions, the expected GRPO update at a cue-independent policy
+    has no component along a pure position preference. In each listing order, position
+    is right in one cue cell and wrong in the other. If each cell's success probability
+    depends on the position preference alone, and std-normalized group weights are
+    symmetric in p ↔ 1 − p, the two cells cancel.
+  * Balanced cells do not establish those assumptions for a transformer trained with
+    Adam: the gradient directions for "first-listed" in the two cue cells need not be
+    opposite in parameter space.
+  * Both seeds went to a deterministic position, seed 0 after reversing direction. This
+    is compatible with noise along a reward-neutral direction, absorbed where groups stop
+    varying. Opposite collapse directions do not exclude systematic dynamics that amplify
+    whichever preference develops first.
   * Once groups are uniform, the cue-rule gradient vanishes too, because it needs
-    variation within groups.
+    variation within groups. That uniform-reward groups lose the GRPO signal is a known
+    limitation (No Prompt Left Behind studies it; not yet read).
   * The early shift to the first-listed code during give-up learning appears in both
     seeds here and in positive control 2. So there may also be a systematic coupling
     between giving up and the first-listed code. It is not identified.
 * Consequence:
   * Positive control 3 fails. The rule is not learned under these conditions.
-  * Of the options listed under Outcomes, a longer budget is ruled out for this
-    configuration (zero gradient). A simpler cue or a larger model remain.
-  * Any change is a new, labelled development stage, decided before it runs.
+  * Of the options listed under Outcomes, an unchanged longer budget is set aside
+    (stagnation, above). A simpler cue or a larger model remain.
+  * Any change is a new, labelled development stage, decided before it runs. The ninth
+    review (below) chose a supervised capability check first (development stage 7a).
+
+**Ninth review (2026-10-18, after positive control 3).** Each point was checked against the
+raw data and the code. All are adopted.
+
+* Verified:
+  * the crossed build is byte-identical to a local rebuild;
+  * the final evaluations hold 12,288 responses per seed (24,576 in all);
+  * on held-out listed give-ups, seed 0 picks the second-listed code 0.9995 of the time
+    and seed 1 the first-listed 0.9998;
+  * seed 0 has zero gradient norm at every step from 49 to 60, and seed 1 has nonzero
+    norms at steps 53, 54, 58 and 59;
+  * `grpo.py` steps AdamW unconditionally (`grpo.py:453`). After a zero-advantage step
+    the gradients are zero tensors, not `None`, so the momentum still updates the
+    parameters.
+* Corrections, made in the positive control 3 section above:
+  * zero sampled gradients are severe stagnation, not permanent inability to improve;
+  * the noise-only account is a hypothesis.
+* The "supervised passes → exploration problem; supervised fails → cue problem" reading
+  proposed before this review was too strong. It is replaced by the outcome table of
+  stage 7a.
+* Next: development stage 7a, a bounded supervised capability check (below). If it
+  succeeds, the follow-up is a controlled GRPO test with a KL penalty to the original
+  pi0, using the existing `--beta`. An entropy objective is deferred until that simple
+  intervention is assessed.
+  * Diversity must be measured as the split between the two code choices and as
+    mixed-reward groups, not as varied wording. A KL penalty guarantees neither.
+  * If diversity is kept and the rule still fails, loss of exploration does not explain
+    the failure. If diversity and rule learning both recover, that supports the remedy.
+  * That follow-up is designed and frozen after stage 7a, not now.
+* Related work to position: No Prompt Left Behind (zero-variance prompts in GRPO), cited
+  by the review; not yet read.
+
+**Development stage 7a: supervised capability check** (`sft_check.py`; recipe frozen
+2026-10-18 with the ninth review, before any run). A labelled development diagnostic. It
+admits nothing to a main study, and its checkpoint is not a starting point for the
+rule-vs-exception comparison: training on the rule makes it non-neutral.
+
+* Recipe:
+  * starts from the original pi0 (Qwen2.5-0.5B-Instruct), on the 512 crossed train
+    renderings of `c2ndxX_s0`, few-shot prefix unchanged;
+  * target exactly `\boxed{GIVE UP: <accepted rule code>}` followed by EOS (`<|im_end|>`,
+    the token that ends assistant turns). The loss is on the completion tokens only;
+  * full-model AdamW, constant lr 1e-5, weight decay 0;
+  * batches of 32 with 8 per cue × order cell;
+  * 10 epochs = 160 updates; seeds 0 and 1 (data order and sampling).
+  * This is a declared diagnostic budget, not compute-matched to GRPO.
+* Implementation choices, fixed with the recipe:
+  * loss = per-token mean over the batch's target tokens;
+  * AdamW betas (0.9, 0.999), eps 1e-8, no gradient clipping, no warmup;
+  * fp32 master weights with bf16 autocast on CUDA, and a bf16 sampling copy, as in
+    `grpo.py`;
+  * each epoch permutes each cell's 128 renderings and splits them into 16 groups of 8.
+    Batch b takes group b from every cell, so each rendering is seen once per epoch
+    (replayed: 160 updates, 8 per cell in every batch, each rendering 10 times, both
+    seeds).
+* Endpoint and criterion: step 160, with the unchanged positive control 3 held-out
+  criteria. That is `hit` ≥ 0.8 in each cue × order cell (≥ 10 give-ups), cue
+  sensitivity ≥ +0.6 in AB and in BA, I_c ≤ 0.2 for both cues, worst cases for missing
+  pairs, 32 samples per held-out rendering and 8 per train rendering. Both seeds must
+  pass (`analyze.py --pc3 --at-step 160`).
+* Training fit (frozen 2026-10-19 with the user's approval of the recipe, replacing the
+  `hit`-based proposal): at step 160, at least 80% of all sampled train responses give
+  the accepted rule code by the existing grader. This holds separately in every cue ×
+  order cell and in each seed, with 8 samples per train rendering, so at least 820 of
+  1,024 responses per cell.
+  * It is unconditional: accepted-code responses / all responses, which equals give-up
+    × `hit`. `hit` conditions on a listed give-up, so a model that writes a listed code
+    10% of the time could have `hit` = 1 while failing 90% of its supervised targets.
+  * It is a functional-fit threshold for this diagnostic and does not mean that every
+    example is mastered. Intervals over renderings are descriptive.
+  * It is a separate verdict (`analyze.py --train-fit`). The `--pc3` verdict covers
+    held-out criteria only, unchanged.
+  * Checked: `--train-fit` on positive control 3 gives 0/1024 and 1021/1024 by cell
+    (FAIL, as expected), and adding it leaves the saved positive control 3 log otherwise
+    byte-identical (it uses its own bootstrap generator).
+* Tracked, descriptive:
+  * training loss per update, overall and by cell (`train.jsonl`);
+  * at step 0 and every 16 updates (each epoch), teacher-forced on all train and
+    held-out renderings and by cell: log pi of the correct exact answer, log pi of the
+    other one, their difference (the margin), and mean σ(margin) (`track.jsonl`);
+    * log pi(correct) reflects both the output format and the code choice; it does not
+      isolate formatting. σ(margin) is the preference between the two exact answer
+      strings, not the probability that unconstrained generation writes the correct
+      code. Both are descriptive diagnostics (corrected at the recipe approval);
+  * sampled evals at step 0 and every 32 updates (2 per train rendering, 4 per held-out),
+    in `grpo.py`'s format. They do not change the endpoint.
+* Outcomes:
+
+  | Supervised result | What it establishes |
+  |---|---|
+  | fits the training examples and passes the held-out criteria | this model and prompt format can learn the transferable mapping with direct supervision; the current RL procedure failed to elicit it |
+  | fits the training examples, fails the held-out criteria | generalization remains the obstacle; correct targets did not solve it |
+  | cannot fit the training examples | check optimization, implementation and budget before blaming the cue or model capacity |
+
+  * A supervised success strengthens the exploration hypothesis without isolating it.
+    Supervision also changes the objective, gives informative gradients for answers
+    that are currently unlikely, and removes uncertainty about which output deserves
+    credit.
+  * Seeds disagree, or either is NOT DEMONSTRATED: not overall success. Report, and
+    decide again.
+* Checked:
+  * the grader reads the target as the accepted code on all 768 renderings, and the
+    other code as `code_other`;
+  * tokenizing the target separately equals the joint tokenization after the prompt;
+  * a Mac smoke run (2 questions, 4 updates, short generations): the format is learned
+    within two updates (log pi(correct) from about −8 to −0.1 … −2.7), and
+    `analyze.py --pc3 --trajectory` reads the run unchanged (arm `sft`; overall line
+    INCOMPLETE with one seed);
+  * MPS runs out of memory with the default micro-batches at 1,160-token prompts. On the
+    Mac, use `--micro-batch 1 --track-micro-batch 2 --gen-batch 4`.
+* Cost: about 40-60 min per seed on a 24 GB GPU (rough). The step-0 sampled eval at pi0
+  output length dominates (about 14 min, as in positive control 3). The 12,288-sample
+  final eval is short-output. On the Mac, several hours per seed: the final eval alone
+  prefills 1,160 tokens for each of 12,288 samples.
+
+```bash
+D=experiments/tie_drift_llm/data; T=experiments/tie_drift_llm
+for SEED in 0 1; do
+  python $T/sft_check.py --dataset $D/c2ndxX_s0.json --seed $SEED --grad-ckpt \
+    2>&1 | tee $D/sft_c2ndxX_s0_s$SEED.log
+done
+python $T/analyze.py --dataset $D/c2ndxX_s0.json --runs $D/runs/c2ndxX_s0_sft --at-step 160 --pc3 \
+  --train-fit --trajectory 2>&1 | tee $D/sft_c2ndxX_s0.log
+```
+
+* Approved 2026-10-19 by the user before either run, with the training-fit correction
+  above and the implementation choices as declared. The user checked the gradient
+  accumulation (each micro-batch's summed loss over the full batch's target-token count,
+  EOS included) and the batching (8 per cell per update, 10 visits per rendering). No
+  hyperparameter search before this bounded check.
+* Reading fixed with the approval: a success establishes that direct supervision can
+  teach this model the mapping. Exploration remains a hypothesis about why GRPO failed,
+  not a proven explanation.
 
 **Fifth review (2026-10-16, on the positive control 2 criterion).** Every point was
 checked and is adopted:
