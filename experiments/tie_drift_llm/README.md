@@ -2046,7 +2046,8 @@ rule-vs-exception comparison: training on the rule makes it non-neutral.
   * a Mac smoke run (2 questions, 4 updates, short generations): the format is learned
     within two updates (log pi(correct) from about −8 to −0.1 … −2.7), and
     `analyze.py --pc3 --trajectory` reads the run unchanged (arm `sft`; overall line
-    INCOMPLETE with one seed);
+    INCOMPLETE with one seed). Its learning numbers are not evidence: MPS can return
+    wrong gradients (found 2026-10-19, stage 7b below). It checked the plumbing only;
   * MPS runs out of memory with the default micro-batches at 1,160-token prompts. On the
     Mac, use `--micro-batch 1 --track-micro-batch 2 --gen-batch 4`.
 * Cost: about 40-60 min per seed on a 24 GB GPU (rough). The step-0 sampled eval at pi0
@@ -2072,6 +2073,265 @@ python $T/analyze.py --dataset $D/c2ndxX_s0.json --runs $D/runs/c2ndxX_s0_sft --
 * Reading fixed with the approval: a success establishes that direct supervision can
   teach this model the mapping. Exploration remains a hypothesis about why GRPO failed,
   not a proven explanation.
+
+**7a results (2026-10-19): both seeds pass the held-out criteria and the training fit.**
+This is the first row of the outcome table. This model and prompt format can learn the
+transferable mapping with direct supervision, and the current RL procedure failed to
+elicit it. Exploration remains a hypothesis.
+
+* Held-out, step 160, 32 samples per rendering:
+  * `hit` 1.00 in every cue × order cell, with 2,043-2,048 of 2,048 give-ups per cell;
+  * cue sensitivity +1.00 in AB and in BA (64/64 pairs, worst +1.00);
+  * I_A = I_B = 0.00 (64/64 pairs);
+  * [PASS] in both seeds; overall PASS.
+* Training fit: 1,024/1,024 accepted-code responses in every cell, both seeds; overall
+  PASS.
+* Held-out accepted-code accuracy over all responses, not only give-ups: 0.9995 /
+  0.9987 (8,188 and 8,181 of 8,192).
+* Checked:
+  * all 24,576 final responses were regraded from the raw text with the grader. The
+    categories match the recorded ones (0 mismatches). 12,282 / 12,277 are exactly the
+    target string;
+  * the responses that missed on held-out prompts (4 and 11 of 8,192) are all unlisted
+    codes. None picks the other listed code. 3 and 6 of them are `beetle`, a train code
+    word;
+  * held-out questions and code words are disjoint from train (0 of 64 questions, 0 of
+    128 words). So the policy writes the code labelled by the cue for words it was never
+    trained on;
+  * `analyze.py` rerun on the Mac reproduces the instance log byte for byte;
+  * the two configs differ only in seed and run directory. Each seed took about 45 min.
+    The checkpoints (`ckpt_final`) stay on the instance and were not copied.
+* Dynamics, descriptive (`train.jsonl`, `track.jsonl`; tracked preferences only every 16
+  updates). Contrasts below are on mean σ(margin) by cell:
+  * cue = mean over cells − 0.5;
+  * second-listed = (A/BA + B/AB − A/AB − B/BA) / 4;
+  * A-label = (A/AB + A/BA − B/AB − B/BA) / 4.
+  * At pi0 (train): cue −0.001, second-listed +0.064, A-label −0.056.
+* Format came first:
+  * log pi(correct) went from about −8 to −0.5 … −1.5 by step 16;
+  * the per-token loss then stayed at 0.05-0.16 from step 4 to step 50 (seed 0) and
+    to step 35 (seed 1);
+  * at step 32 the sampled give-up rate was 0.96 / 0.93 with `hit` 0.51 / 0.58, so the
+    format was learned and the code was near chance.
+* The cue mapping then appeared abruptly:
+  * the loss fell from 0.05 to 0.01 within five updates (steps 51 → 56 in seed 0, 36 → 41
+    in seed 1);
+  * margins reached +11 to +23 nats;
+  * the final KL to pi0 was 7.95, close to −log pi0(target) ≈ 8, so the policy is nearly
+    deterministic on the target.
+* Held-out moved with train at every tracked step. The cue contrast was seed 0 step 48:
+  train +0.068, held-out +0.062; seed 1 step 32: +0.075, +0.073; +0.500 from step 64 /
+  48. No tracked step shows a train-only fit before generalization. The resolution is
+  coarse.
+* Before the transition, both seeds passed through cue-independent preferences:
+  * at step 16, both favoured the second-listed code: seed 0 +0.107 train / +0.126
+    held-out, seed 1 +0.099 / +0.111;
+  * at step 48, seed 0 favoured the A-labelled code (+0.070 / +0.113);
+  * both are 0.000 once the cue takes over.
+* Post hoc, bearing on the positive control 3 reading (ninth review), not identified:
+  * a balanced, dense supervised objective also produced a transient position
+    preference, in the same direction in both seeds. So position bias can appear
+    without GRPO rollout sampling. Two stochastic supervised runs do not show more
+    than that (wording corrected by the tenth review; it first said "not only sampling
+    noise");
+  * under GRPO the preference became deterministic and groups stopped varying. Under
+    supervision the gradient on the correct code stays nonzero, and the preference faded;
+  * the objectives differ: in positive control 3 the early shift was to the first-listed
+    code, here to the second.
+* Next: the follow-up named by the ninth review, a controlled GRPO test with a KL
+  penalty to the original pi0 (`--beta`). Diversity is measured as the split between
+  the two code choices and as mixed-reward groups. It is designed and frozen before it
+  runs (development stage 7b, below).
+
+**Tenth review (2026-10-19, after stage 7a).** Each point was checked against the raw
+data and the code. All are adopted.
+
+* Verified:
+  * the reviewer's independent regrade of all 24,576 final responses agrees (0
+    discrepancies). Held-out accepted-code accuracy over all responses is 0.9995 /
+    0.9987 (added to the results above);
+  * at step 32, listed give-ups are 0.96 / 0.93 of train responses, with `hit` 0.51 /
+    0.58;
+  * positive control 3, steps 41-60: 6/640 and 8/640 groups had mixed rewards, and
+    318/640 had no rewarded response, in each seed (`analyze.py --groups` on the old
+    record);
+  * positive control 3 declared `--kl-stop 100`; the `grpo.py` default is 4;
+  * `grpo.py --beta` adds β · k3 per token to the loss (`grpo.py:430`). Checked
+    numerically on a categorical: its expected gradient at a visited state equals
+    ∇KL(pi0 ‖ pi), not ∇KL(pi ‖ pi0).
+* Reading of 7a:
+  * learning to give up and learning which code the cue requires are separate stages
+    (the step-32 numbers above);
+  * 7a does not show that exploration alone explains GRPO's failure. Supervision also
+    changed the objective, the learning rate (1e-5 vs. 1e-6), the update budget (160
+    vs. 60) and whether corrective gradients are available;
+  * changing the cue or the model size is no longer the immediate priority.
+* Correction, made in the 7a results: "not only sampling noise" becomes "position bias
+  can appear without GRPO rollout sampling".
+* Next question: does reference regularization prevent premature code-choice collapse
+  and enable transferable rule learning? (Development stage 7b.)
+* Publication: 7a removes a feasibility concern. The transferable behaviour exists and
+  is learnable here. The KL study should give a working RL setting. The central
+  contribution must still come from the later controlled experiment on behaviour under
+  reward ties.
+
+**Development stage 7b: GRPO with a KL penalty to pi0** (proposed by the tenth review;
+frozen 2026-10-19 on the eleventh review's approval, passed on by the user, before any
+run). A labelled development experiment. It admits nothing to a main study.
+
+* Arms: β ∈ {0, 0.01, 0.1} × seeds {0, 1}, six runs.
+  * A declared bracket, not coefficients inferred to be optimal.
+  * Every run is reported.
+  * A coefficient succeeds only if both of its seeds pass. Successes at different
+    coefficients are not combined.
+* Unchanged from positive control 3:
+  * the original pi0 is both the start and the frozen reference;
+  * `c2ndxX_s0`, `--balance-cells`, `--reward hack_only`;
+  * Adam, lr 1e-6, betas (0.9, 0.999), weight decay 0, no clipping;
+  * G = 8, 32 prompts per step, loss aggregation `sum`, std normalization, 384 new
+    tokens;
+  * micro-batch 4 with gradient checkpointing (implementation only);
+  * `--kl-stop 100`, stated explicitly. The default of 4 would be another
+    intervention. The supervised solution reached KL ≈ 8, which does not show that 8 is
+    needed.
+* Budget: 160 updates for every arm, including β = 0.
+  * That is ten passes through each cell (128 renderings per cell, 8 per step).
+  * Checkpoints at 60 and 160.
+  * Step 160 decides. Step 60 is a descriptive comparison with positive control 3, so
+    longer KL runs are not compared against shorter controls.
+  * β = 0 uses positive control 3's flags and seeds, so its batches and sampling seeds
+    for steps 1-60 equal those of positive control 3. Bitwise agreement is not expected
+    on other hardware, so any agreement is descriptive. Its step-60 eval uses 2 / 4
+    samples, not 32 / 8.
+  * This is a larger development experiment than 7a.
+* Endpoint: the unchanged positive control 3 held-out criteria at step 160, with 32
+  samples per held-out rendering and 8 per train rendering, each seed.
+  `analyze.py --pc3` also prints the unconditional accepted-code accuracy (accepted /
+  all responses, train and held-out) beside the conditional `hit`; it is descriptive.
+* Intermediate evals every 10 updates, at 2 samples per train rendering and 4 per
+  held-out rendering. They are descriptive. No checkpoint is selected as best, and no run
+  is extended after its results are seen.
+* Group diversity. New record in `grpo.py`'s `train.jsonl`: per training group, `groups`
+  holds the prompt id, the responses giving code A, those giving code B, other
+  responses, and rewarded responses (`config.json` `group_fields`). `analyze.py
+  --groups` reports, per 20-step window and cue × order cell:
+  * groups containing both listed codes;
+  * groups with mixed rewards, with all responses rewarded, and with none rewarded;
+  * listed-code coverage and accepted-code accuracy, over all responses.
+  * Why per group: a pooled 50:50 code split can hide deterministic choices on each
+    prompt. Mixed rewards can also come from the accepted code against malformed
+    answers, with no exploration of the other listed code.
+  * High diversity is not required at the endpoint, because a learned rule should
+    become confident. The failure signature is confidence in wrong choices while the
+    corrective samples disappear.
+  * Positive control 3 baseline, steps 41-60: 6/640 and 8/640 groups mixed, 318/640
+    with none rewarded. Old runs have only the reward split, from `zero_adv_by`.
+  * Frozen reading (eleventh review): diversity measures are descriptive mechanism
+    diagnostics, not additional pass/fail criteria. Every 20-step window is reported,
+    separately by cue × order cell and seed, alongside accepted-code accuracy. Each
+    positive-β arm is compared with its same-seed β = 0 control. Ambiguous trajectories
+    remain inconclusive. Only the declared step-160 performance criteria determine
+    success.
+  * Steps 41-60 are highlighted as the window where positive control 3 collapsed, and
+    the complete trajectory through step 160 is shown, so no favourable window is
+    chosen afterwards. There is no universal diversity cutoff: low diversity can mean
+    either mastery or confident failure.
+* Qualifications, recorded before running:
+  * nonzero total gradients under KL do not show restored reward learning. The penalty
+    supplies gradients when every reward advantage is zero. The reward signal is read
+    from mixed groups, not from gradient norms;
+  * `--beta` is the usual k3 penalty in the loss, k3 = r − log r − 1 with r = pi0 / pi.
+    At each visited state its expected gradient is ∇KL(pi0 ‖ pi), with states held
+    fixed. It is not an unbiased gradient of the sequence-level KL(pi ‖ pi0) (A Comedy
+    of Estimators, arXiv 2512.21852; not yet read). It is kept for this controlled
+    intervention and described accordingly;
+  * noted here (not from the review), and qualified by the eleventh review: under
+    on-policy sampling, with full support and the visited state held fixed, that
+    expected gradient is −β Σ_a pi0(a | s) ∇ log pi(a | s). In expectation, the penalty
+    favours reference-supported tokens at visited prefixes. This does not guarantee
+    that finite sampled updates restore a rarely generated code. Rare, large
+    importance-ratio contributions ((1 − pi0 / pi) for a token pi has made rare) can
+    dominate that expectation. A code is a sequence, not necessarily one token, and the
+    prefixes inside it are visited only when it is sampled. This distinction is kept
+    when reading a failed rescue.
+* Outcomes, read narrowly:
+
+  | Result | Supported conclusion |
+  |---|---|
+  | code diversity persists and the rule passes | if the arm outperforms its same-seed β = 0 control, this regularization rescues learning, and the trajectory supports an exploration account |
+  | code diversity persists but the rule fails | preserving the observed diversity was not enough under this intervention and budget |
+  | code diversity still collapses | these coefficients did not prevent premature collapse onto incorrect choices within the declared budget |
+  | β = 0 also learns by step 160 | the 60-step failure was not persistent; the longer control changes the explanation |
+
+  * Even the second row does not rule out exploration. KL can preserve alternatives
+    while also opposing useful learning.
+  * In the third row the remedy was tested and did not work. It is not a missing test
+    (eleventh review, correcting the tenth review's wording).
+  * If a positive-β arm and β = 0 both learn, the interpretation concerns their
+    trajectories or learning speed, not a rescue.
+  * "Persists" and "collapses" have no numeric definition. They are read descriptively
+    from the `--groups` report, as frozen above.
+* Checked:
+  * the new record on a Mac smoke run (`--beta 0.1`, 2 steps). `analyze.py --groups`
+    and the accuracy line read it;
+  * the positive control 3 and 7a logs are unchanged apart from the added lines
+    (both rerun);
+  * the `--groups` fallback reproduces the positive control 3 baseline above;
+  * added at the approval: a run with `group_fields` whose training row lacks `groups`
+    stops with an incomplete-record error, instead of reporting zero code diversity,
+    coverage and accuracy (checked on a copy of the smoke run with one row's record
+    removed). Runs without `group_fields` keep the reward-only fallback. A window with
+    fewer steps than `--group-window` is labelled with the steps it holds: the 2-step
+    smoke run prints "steps 1-2 (2 of 20 steps)", not "steps 1-20".
+* Mac caveat, found in that smoke run, torch 2.12.0 on MPS:
+  * a backward pass through 0 · f(θ) returned nonzero gradients (norm up to 2.4e6) for
+    some completion lengths. Every per-token term was multiplied by an exactly zero
+    advantage, as at a step where every group has zero advantage, so the gradient is
+    identically zero. This differs from a loss whose value happens to be zero: a
+    group-centred GRPO loss can be zero in value and still have nonzero gradients.
+    Whether the bug appears depends on what ran before: 31 tokens gave 1.1e4 after
+    earlier passes and 0 in a fresh process;
+  * CPU gives exactly 0. On CUDA, positive control 3 logged gradient norm 0 at every
+    zero-advantage step;
+  * so Mac runs check plumbing only. Their gradients and learning numbers are not
+    evidence;
+  * the eleventh review did not reproduce it independently. It does not affect the
+    CUDA runs.
+* Cost, from positive control 3's timings (about 50-135 s per step, evals at 2 / 4
+  samples 0.05-0.23 h, the 12,288-sample final eval about 0.2 h):
+  * about 4 h per run if outputs shorten as in positive control 3;
+  * up to about 9 h if the penalty keeps pi0-length outputs;
+  * 25-55 GPU-hours for six runs. One job fills a 24 GB card, so 1-2.5 days on one
+    card, or the arms on separate instances;
+  * two checkpoints per run, about 1 GB each.
+
+```bash
+D=experiments/tie_drift_llm/data; T=experiments/tie_drift_llm; V=c2ndxX_s0
+for BETA in 0 0.01 0.1; do
+  for SEED in 0 1; do
+    python $T/grpo.py --dataset $D/$V.json --cond rule --reward hack_only --seed $SEED --balance-cells \
+      --beta $BETA --steps 160 --eval-every 10 --eval-samples 2 --eval-samples-other 4 --kl-stop 100 \
+      --save-steps 60 160 --final-eval-samples 32 --final-eval-samples-train 8 \
+      --grad-ckpt --micro-batch 4 --gen-batch 128 --out $D/runs/${V}_kl/rule_kl${BETA}_s$SEED \
+      2>&1 | tee $D/kl_${V}_b${BETA}_s$SEED.log
+  done
+done
+python $T/analyze.py --dataset $D/$V.json --runs $D/runs/${V}_kl --at-step 160 --pc3 --trajectory \
+  --groups 2>&1 | tee $D/kl_$V.log
+```
+
+* Approved 2026-10-19 by the eleventh review (passed on by the user) before any run,
+  with the descriptive diversity reading and the corrections above. The reviewer checked
+  the diff and that the commands keep positive control 3's training settings,
+  reproduced the old-run counts, tested the group summaries on constructed cases (they
+  separate both-code groups from mixed rewards caused by malformed answers), and checked
+  the expected-gradient identity numerically.
+* Corrections made at the approval: the incomplete-record error and the window labels
+  (Checked, above); the qualified unsampled-code note; the third row of the outcome
+  table and the condition on "rescues"; the Mac caveat's zero-objective wording.
+* Added here, not from the review: "outperforms" in the first row means the arm passes
+  the step-160 criteria where its β = 0 control does not, since only those criteria
+  decide.
 
 **Fifth review (2026-10-16, on the positive control 2 criterion).** Every point was
 checked and is adopted:

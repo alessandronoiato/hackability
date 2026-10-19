@@ -28,6 +28,11 @@ Design choices that matter for the theory:
   * the frozen reference pi0 is an fp32 copy run under the same autocast, so the
     KL estimate is exactly 0 at step 0;
   * sampling is exact (temperature 1, no top-k/top-p/repetition penalty);
+  * --beta adds beta * k3 per token to the loss, k3 = r - log r - 1 with r = pi0 / pi.
+    At each visited state its expected gradient is the gradient of KL(pi0 || pi) there,
+    states held fixed. So it is not an unbiased gradient of the sequence-level
+    KL(pi || pi0) (A Comedy of Estimators, arXiv 2512.21852). It also gives nonzero
+    gradients when every reward advantage is zero;
   * prompt order and sampling seeds depend only on --seed, so runs with the
     same seed and different K share their random numbers.
 
@@ -98,7 +103,7 @@ def parse_args():
                     help="divide group-centred rewards by the group std (GRPO)")
     ap.add_argument("--loss-agg", choices=["sum", "token_mean", "seq_mean"], default="sum",
                     help="sum: sequence log-prob (theory); token_mean: DAPO; seq_mean: original GRPO")
-    ap.add_argument("--beta", type=float, default=0.0, help="KL penalty (k3 estimator) to pi0")
+    ap.add_argument("--beta", type=float, default=0.0, help="KL penalty to pi0: k3 per token in the loss (see the docstring)")
     ap.add_argument("--inner-steps", type=int, default=1,
                     help="optimizer steps per generated batch (mu); clipping is inactive at 1")
     ap.add_argument("--clip-eps", type=float, default=0.0, help="PPO ratio clip; 0 = off")
@@ -214,9 +219,10 @@ def main() -> None:
     out.mkdir(parents=True, exist_ok=True)
     for f in ("train.jsonl", "eval.jsonl", "samples.jsonl", "eval_samples.jsonl.gz"):
         (out / f).unlink(missing_ok=True)
+    code_keys = sorted(prompts[0]["codes"])
     cfg = dict(vars(a), K=int(a.cond) if a.cond.isdigit() else None, dataset_spec=ds["spec"],
                conditions=conds, n_prompts_used=N, eval_splits={k: len(v) for k, v in splits.items()},
-               run_dir=str(out))
+               run_dir=str(out), group_fields=["prompt_id", *code_keys, "other", "rewarded"])
 
     device = llm.pick_device(a.device)
     torch.manual_seed(a.seed)
@@ -469,11 +475,20 @@ def main() -> None:
                     z[0] += 1
                     z[1] += bool(R[k].min() == 1)
                     z[2] += bool(R[k].max() == 0)
+        # Per group (cfg["group_fields"]): prompt id, responses giving each listed code, other
+        # responses, rewarded responses. Mixed rewards alone do not show that both listed
+        # codes were tried: a correct code against malformed answers is also mixed.
+        groups = []
+        for k in range(len(bidx)):
+            p = prompts[bidx[smp[k * a.group].prompt_idx]]
+            ch = [task.chosen_label(s.text, p) for s in smp[k * a.group:(k + 1) * a.group]]
+            n_code = [ch.count(c) for c in code_keys]
+            groups.append([p["id"], *n_code, a.group - sum(n_code), int(R[k].sum())])
         rec = dict(
             step=step, kl_batch=float(kl_seq.mean()), pass_rate=float(R.mean()),
             hack_share=hk / max(hon + hk, 1),
             **{f"frac_{c}": sum(x == c for x in cats) / n_seq for c in task.CATEGORIES},
-            zero_adv_groups=float(np.mean(R.std(1) == 0)), zero_adv_by=zero_by, grad_norm=gnorm,
+            zero_adv_groups=float(np.mean(R.std(1) == 0)), zero_adv_by=zero_by, groups=groups, grad_norm=gnorm,
             lr=opt.param_groups[0]["lr"], mean_len=n_tok / n_seq,
             truncated=float(np.mean([s.truncated for s in smp])),
             clip_frac=clip_n / clip_d if clip_d else 0.0, t_gen=t_gen, t_step=t_gen + t(),

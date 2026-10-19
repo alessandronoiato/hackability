@@ -38,7 +38,10 @@ Under --reward hack_only honest answers earn 0, so `drift` is not within-tie dri
 such runs are capability controls (a note is printed). --trajectory
 prints the same block at every eval, with the zero-advantage groups (all pass / all
 fail) per cue value summed over the training steps since the previous eval. Show the
-trajectory; the declared step (--at-step) stays the endpoint.
+trajectory; the declared step (--at-step) stays the endpoint. --pc3 also prints the
+unconditional accepted-code accuracy (accepted / all responses) beside the conditional
+hit. --groups prints the code-choice diversity of the training groups per window of
+steps (see group_windows).
 
 Secondary (matched KL): each eval curve is interpolated at the KL targets (first
 crossing), and the paired gap is reported with
@@ -324,6 +327,9 @@ def overall_line(verdicts: dict) -> str:
     return "NOT PASSED (a split result or NOT DEMONSTRATED is not overall success)"
 
 
+CELLS = ("A/AB", "A/BA", "B/AB", "B/BA")
+
+
 def fit_verdict(e: dict, cells: dict, S: int, rng, need: int = 8) -> str:
     """Training fit (stage 7a, README): at step S, accepted-code responses / all sampled train
     responses >= 0.8 in every cue x order cell, with `need` samples per train rendering.
@@ -333,14 +339,68 @@ def fit_verdict(e: dict, cells: dict, S: int, rng, need: int = 8) -> str:
         fails.append(f"last eval at step {e['step']}, not {S}")
     if (e["eval_samples"][0] or 0) < need:
         fails.append(f"{e['eval_samples'][0]} samples per train rendering, not {need}")
-    for cell in ("A/AB", "A/BA", "B/AB", "B/BA"):
-        cnt = cells.get(cell, {})
-        n, h = (sum(v[k] for v in cnt.values()) for k in (0, 2))
-        lo, hi = prompt_boot(cnt, rng, den=0)
-        parts.append(f"{cell} {h}/{n}" + (f" = {h / n:.3f} [{lo:.3f},{hi:.3f}]" if n else ""))
+    for cell in CELLS:
+        s, n, h = accuracy_cell(cells.get(cell, {}), rng)
+        parts.append(f"{cell} {s}")
         if not n or h / n < 0.8:
             fails.append(f"{cell} {h}/{n}")
     return ("[FAIL] " + "; ".join(fails) if fails else "[PASS]") + "  (" + "; ".join(parts) + ")"
+
+
+
+def accuracy_cell(cnt: dict, rng) -> tuple[str, int, int]:
+    """Accepted-code responses / all responses in one cell, with a 95% interval over prompts."""
+    n, h = (sum(v[k] for v in cnt.values()) for k in (0, 2))
+    lo, hi = prompt_boot(cnt, rng, den=0)
+    return f"{h}/{n}" + (f" = {h / n:.3f} [{lo:.3f},{hi:.3f}]" if n else ""), n, h
+
+
+def group_windows(tr: list[dict], prompts: list[dict], cfg: dict, window: int) -> list[str]:
+    """Code-choice diversity of the training groups, per window of steps and cue x order cell.
+
+    From grpo.py's per-group record (cfg["group_fields"]): groups holding both listed
+    codes, with mixed rewards, all rewarded, none rewarded; listed-code coverage and
+    accepted-code accuracy over all the group's responses. A pooled 50:50 code split can
+    hide deterministic choices per prompt, and mixed rewards can come from the accepted
+    code against malformed answers. Runs logged before the record (no group_fields) have
+    only the reward split (zero_adv_by); a newer run missing the record at some step is an
+    error, not zero diversity. A window is labelled with the steps it actually holds.
+    """
+    G, cond = cfg["group"], str(cfg.get("cond"))
+    fields = cfg.get("group_fields")
+    acc = defaultdict(lambda: defaultdict(lambda: np.zeros(7, int)))  # n, both, mixed, all+, all-, listed, accepted
+    seen = defaultdict(list)
+    for t in tr:
+        w = (t["step"] - 1) // window
+        seen[w].append(t["step"])
+        if fields:
+            if not t.get("groups"):
+                raise ValueError(f"step {t['step']}: no group record although config.json has group_fields "
+                                 "(incomplete log); refusing to report it as zero diversity")
+            for g in t["groups"]:
+                rec = dict(zip(fields, g))
+                p = prompts[rec["prompt_id"]]
+                word = p["accept"][cond] if "accept" in p else p["codes"][cond]
+                lab = next((k for k, v in p["codes"].items() if v == word), None)
+                ca, cb, rw = rec["A"], rec["B"], rec["rewarded"]
+                acc[w][f"{p['cue']}/{p.get('order', 'AB')}"] += [1, ca > 0 and cb > 0, 0 < rw < G, rw == G, rw == 0,
+                                                                ca + cb, rec[lab] if lab else 0]
+        else:
+            for k, v in (t.get("zero_adv_by") or {}).items():
+                if "/" in k:
+                    acc[w][k] += [v[0], 0, v[0] - v[1] - v[2], v[1], v[2], 0, 0]
+    lines = []
+    for w in sorted(acc):
+        parts = []
+        for cell in sorted(acc[w]):
+            n, both, mix, ap, af, li, ok = acc[w][cell]
+            codes = (f"both codes {both}/{n}, " if fields else "both codes -, ")
+            tail = (f", listed {li / (n * G):.2f}, accepted {ok / (n * G):.2f}" if fields else "")
+            parts.append(f"{cell}: {codes}mixed {mix}/{n}, all rewarded {ap}, none {af}{tail}")
+        st = seen[w]
+        short = f" ({len(st)} of {window} steps)" if len(st) != window else ""
+        lines.append(f"steps {min(st)}-{max(st)}{short}: " + "; ".join(parts))
+    return lines
 
 
 def mechanism_line(e: dict, cells: dict | None = None, rng=None) -> str:
@@ -460,6 +520,9 @@ def main() -> None:
                     help="stage 7a training-fit verdict: unconditional accepted-code rate per cue x order cell")
     ap.add_argument("--pc3", action="store_true",
                     help="positive control 3 verdict (crossed training; held-out cue sensitivity replaces flip pairs)")
+    ap.add_argument("--groups", action="store_true",
+                    help="code-choice diversity of the training groups per window of steps and cue x order cell")
+    ap.add_argument("--group-window", type=int, default=20, help="steps per window for --groups")
     args = ap.parse_args()
 
     dsp = Path(args.dataset)
@@ -552,6 +615,17 @@ def main() -> None:
                     verdicts[s_] = pc_verdict(e, cells, S, e.get(key), label)
                     print(f"    {c} s{s_}: {verdicts[s_]}")
                 print(f"    {c} overall, every seed must PASS: {overall_line(verdicts)}")
+            if n_pc == 3:
+                print(f"  accepted-code accuracy at step {S}, all sampled responses (unconditional; descriptive, "
+                      "beside the conditional hit; 95% CI over renderings):")
+                for c in ends:
+                    for s_ in sorted(ends[c]):
+                        cs = eval_cells(by[c][s_]["dir"], ds_prompts).get(ends[c][s_]["step"], {})
+                        acc_rng = np.random.default_rng(0)  # own generator, as for --train-fit
+                        print(f"    {c} s{s_}: " + " | ".join(
+                            f"{sp} " + "; ".join(f"{cell} {accuracy_cell(cs[sp].get(cell, {}), acc_rng)[0]}"
+                                                 for cell in CELLS)
+                            for sp in ("train", "heldout") if sp in cs))
         if args.train_fit and ds_prompts and "cue" in ds_prompts[0]:
             print(f"  training fit at step {S} (separate from the held-out verdict): accepted-code responses / all "
                   "sampled train responses (existing grader) >= 0.8 in every cue x order cell, 8 samples per train "
@@ -589,6 +663,16 @@ def main() -> None:
                               + (f" zero-adv {z}" if z else "")
                               + f"\n      {mechanism_line(rec, cells.get(e['step']), rng)}")
                         prev = e["step"]
+        if args.groups and ds_prompts and "cue" in ds_prompts[0]:
+            for c in sorted(by, key=cond_key):
+                for s_ in sorted(by[c]):
+                    r = by[c][s_]
+                    tr_f = r["dir"] / "train.jsonl"
+                    tr = [json.loads(x) for x in open(tr_f)] if tr_f.exists() else []
+                    print(f"  training groups {c} s{s_} (G = {r['cfg']['group']}; per {args.group_window} steps and "
+                          "cue x order cell; listed / accepted = share of all responses):")
+                    for line in group_windows(tr, ds_prompts, r["cfg"], args.group_window):
+                        print(f"    {line}")
         table[arm]["fixed_step"] = dict(step=S, runs=ends, contrasts={})
         for c1, c2 in contrasts(sorted(by, key=cond_key)):
             seeds = sorted(set(ends.get(c1, {})) & set(ends.get(c2, {})))
