@@ -45,6 +45,7 @@ import argparse
 import gzip
 import json
 import math
+import subprocess
 import sys
 from pathlib import Path
 
@@ -151,6 +152,19 @@ def cond_tag(cond: str) -> str:
     return f"K{cond}" if cond.isdigit() else cond
 
 
+def git_commit() -> str | None:
+    """HEAD of the checkout this script runs from, '+dirty' if tracked files differ; None outside git."""
+    here = Path(__file__).resolve().parent
+    try:
+        head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=here, capture_output=True, text=True,
+                              check=True).stdout.strip()
+        dirty = subprocess.run(["git", "status", "--porcelain", "--untracked-files=no"], cwd=here,
+                               capture_output=True, text=True, check=True).stdout.strip()
+    except (OSError, subprocess.CalledProcessError):
+        return None
+    return head + ("+dirty" if dirty else "")
+
+
 def run_name(a) -> str:
     lr = "auto" if a.lr is None and a.optimizer == "sgd" else f"{a.lr or 1e-6:g}"
     s = f"{cond_tag(a.cond)}_{a.optimizer}_lr{lr}"
@@ -222,7 +236,8 @@ def main() -> None:
     code_keys = sorted(prompts[0]["codes"])
     cfg = dict(vars(a), K=int(a.cond) if a.cond.isdigit() else None, dataset_spec=ds["spec"],
                conditions=conds, n_prompts_used=N, eval_splits={k: len(v) for k, v in splits.items()},
-               run_dir=str(out), group_fields=["prompt_id", *code_keys, "other", "rewarded"])
+               run_dir=str(out), group_fields=["prompt_id", *code_keys, "other", "rewarded"],
+               git_commit=git_commit())
 
     device = llm.pick_device(a.device)
     torch.manual_seed(a.seed)

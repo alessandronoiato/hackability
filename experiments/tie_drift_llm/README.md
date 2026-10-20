@@ -2333,6 +2333,291 @@ python $T/analyze.py --dataset $D/$V.json --runs $D/runs/${V}_kl --at-step 160 -
   the step-160 criteria where its β = 0 control does not, since only those criteria
   decide.
 
+**7b results (2026-10-20): β = 0.1 passes in both seeds; β = 0.01 is split; β = 0
+fails in both seeds.** By the frozen rule only β = 0.1 succeeds. Both of its same-seed
+β = 0 controls fail, so this is the first row of the outcome table. Within this build,
+model, learning rate and 160-update budget, the KL penalty rescues learning, and the
+trajectory supports an exploration account. It does not isolate exploration (below).
+
+Step 160, 32 samples per held-out rendering (`analyze.py --pc3`; regraded
+independently, below):
+
+| arm | seed | verdict | held-out hit, lowest cell | cue sensitivity AB / BA | I_A / I_B | held-out accepted / all, lowest cell |
+|---|---|---|---|---|---|---|
+| β = 0 | 0 | FAIL | 0/2048 (A/AB; always second-listed) | 0.00 / 0.00 | 1.00 / 1.00 | 0.000 |
+| β = 0 | 1 | FAIL | 0/2048 (A/BA; always first-listed) | 0.00 / 0.00 | 1.00 / 1.00 | 0.000 |
+| β = 0.01 | 0 | FAIL | 4/2045 (A/AB; second-listed; B/BA 64/2039) | −0.00 / −0.00 | 0.97 / 0.96 | 0.002 |
+| β = 0.01 | 1 | PASS | 0.996 (A/BA, 2033/2042) | +1.00 / +1.00 | 0.00 / 0.00 | 0.993 |
+| β = 0.1 | 0 | PASS | 0.891 (B/AB, 1763/1978) | +0.87 / +0.95 | 0.02 / 0.08 | 0.861 |
+| β = 0.1 | 1 | PASS | 0.921 (A/BA, 1819/1974) | +0.88 / +0.90 | 0.06 / 0.03 | 0.888 |
+
+Every held-out pair had give-ups in both renderings (64/64), so no worst-case
+substitution was needed. At β = 0.1, held-out accepted-code accuracy over all responses
+is 7,542 and 7,541 of 8,192 (0.921 / 0.921).
+
+* Protocol deviation: the instance ran the `grpo.py` from before 4c8d8da. No
+  `config.json` has `group_fields`, and no `train.jsonl` row has `groups`. The analysis
+  ran after a pull, so `--groups` used the reward-only fallback.
+  * In `grpo.py`, 4c8d8da changed only the logging, a docstring and a help string.
+    Training, the flags and the decision are as frozen.
+  * Lost: the per-group code counts. Training rollouts are not saved, so they cannot be
+    rebuilt.
+  * Substitute (post hoc, descriptive): the eval samples on train renderings at every
+    intermediate eval, 2 per rendering over 512 renderings. Reported: the renderings
+    whose two samples are listed give-ups with different codes, over all 512 renderings
+    (unbiased for the mean of 2 p_A p_B, p_A and p_B a rendering's probabilities of the
+    two listed codes) and over the renderings whose two samples were both listed
+    give-ups (2q(1 − q) with q the other-code share among listed give-ups, weighted by
+    (p_A + p_B)^2; corrected by the twelfth review, which caught the first write-up
+    reporting the second under the first's label). Also the accepted, other listed and
+    not-listed shares. Unlike mixed rewards, this shows code diversity directly. But it
+    is two samples per rendering every 10 steps, not every training group.
+  * Lesson: check `git log -1` on the instance before a run.
+* Checked:
+  * every config matches the frozen flags (lr 1e-6, G = 8, `sum`, balanced cells,
+    `hack_only`, `--kl-stop 100`, 160 steps, saves at 60 / 160, evals every 10 at 2 / 4,
+    final 32 / 8). Every run reached step 160;
+  * all 73,728 final responses (6 × 12,288): the recorded `chosen` equals the grader's
+    on every one. A stricter parser of my own (exact `\boxed{GIVE UP: word}`, case
+    sensitive) differs on 6-40 responses per run. These are case and spelling variants
+    the grader accepts (`give-up: plum`, `GIVEUP: sauce`, `Salmon`), most frequent at
+    β = 0.1. Under the strict parser every verdict is unchanged, and held-out hit and
+    cue sensitivity move by at most 0.001;
+  * cue sensitivity and I_c recomputed from the samples with separate code agree with
+    `analyze.py` (I_c to its printed two decimals);
+  * β = 0 against positive control 3: the step-1 rollouts are identical (pass rate, hack
+    share, zero-advantage groups, mean length; gradient norm to 1e-4 relative). The runs
+    diverge from step 2, as expected on other hardware. Both seeds collapse onto the
+    same listing position as positive control 3 (seed 0 second-listed, seed 1
+    first-listed) by step 40, and stay there to step 160. The gradient norm is exactly 0
+    at 105 / 106 of 160 steps (first at 40 / 37). From step 41, mixed groups number 0-5
+    per 160 in every cell and window. So the 60-step failure persisted, and the fourth
+    outcome row does not apply;
+  * step 1 of every arm has the same rollouts as the same-seed β = 0 run, as expected:
+    the penalty's gradient is zero at pi = pi0;
+  * runtime: 3.4 h per β = 0 run, 3.8-4.1 h at 0.01, 5.4-5.5 h at 0.1 (52, 56-60 and
+    76-77 s per step); 25.6 h in all, the low end of the estimate.
+* Diversity (descriptive). Steps 41-60 are the window where positive control 3
+  collapsed. Mixed groups summed over the four cells, of 640:
+
+  | | PC3 | β = 0 | β = 0.01 | β = 0.1 |
+  |---|---|---|---|---|
+  | seed 0 | 6 | 4 | 8 | 503 |
+  | seed 1 | 8 | 5 | 267 | 495 |
+
+  Train renderings whose two eval samples gave different listed codes, as count /
+  renderings with both samples listed give-ups (all 512 renderings had two samples), and
+  the accepted share of all train responses, at steps 20 / 40 / 60 / 80 / 100 / 120:
+
+  | run | different listed codes / both listed (of 512) | accepted |
+  |---|---|---|
+  | β = 0 s0 | 134/491, 2/511, 0/512, 0/511, 0/510, 0/512 | .494 .501 .500 .499 .499 .500 |
+  | β = 0 s1 | 23/498, 2/512, 0/510, 0/511, 1/511, 0/510 | .490 .498 .499 .500 .501 .500 |
+  | β = 0.01 s0 | 135/483, 3/508, 0/511, 2/504, 1/509, 0/511 | .484 .500 .499 .497 .498 .499 |
+  | β = 0.01 s1 | 47/496, 93/510, 44/504, 18/464, 2/508, 0/509 | .487 .507 .562 .820 .994 .997 |
+  | β = 0.1 s0 | 139/451, 141/484, 129/436, 27/474, 48/426, 12/485 | .468 .491 .542 .924 .817 .960 |
+  | β = 0.1 s1 | 132/456, 146/463, 142/438, 128/412, 69/454, 1/487 | .466 .498 .477 .472 .818 .974 |
+
+  * At step 60, β = 0.1: 129/512 = 0.252 of all renderings (129/436 = 0.296 of those
+    with both samples listed) in seed 0; 142/512 = 0.277 (142/438 = 0.324) in seed 1.
+  * During the period when β = 0 lost reward variation, β = 0.1 retained mixed-reward
+    training groups and independently showed substantial code-choice diversity in
+    evaluation (wording of the twelfth review). The eval samples cannot recover the
+    composition of the missing training groups, so how many of those mixed groups held
+    both listed codes is unknown.
+* Reading:
+  * β = 0.1: code diversity persisted. In eval, 129-152 of 512 train renderings
+    (0.25-0.30) gave both listed codes at every eval from step 20 to 60 in seed 0, and
+    110-146 (0.21-0.29) from step 20 to 90 in seed 1, against at most 1 of 512 from
+    step 50 at β = 0. About 500 / 640 training groups were mixed in steps 41-60,
+    against 4-5. The rule passes in
+    both seeds where both β = 0 controls fail. This is the first outcome row;
+  * learning came late. At step 60 both β = 0.1 seeds were near chance on train
+    (accepted 0.54 / 0.48), with held-out cue sensitivity at most +0.38. The transitions
+    came at steps 60-80 (seed 0) and 90-110 (seed 1). So a 60-step budget would have
+    failed;
+  * β = 0.01 split:
+    * seed 0 collapsed onto second-listed by step 40, like β = 0 seed 0. There is a
+      small late leak: B/BA hit 0.048 at step 160, and 23 and 16 of 160 groups mixed
+      in A/BA and B/BA in steps 141-160. This is descriptive; the run was not
+      extended;
+    * seed 1 started toward the first-listed collapse (A/AB 0.94, B/BA 0.91 accepted at
+      step 20). It kept intermediate diversity (0.09-0.18 at steps 20-60), then escaped
+      cell by cell: B/AB accepted 0.07 → 0.44 → 1.00 at steps 20 / 50 / 70, and A/BA
+      0.02 → 0.30 → 1.00 at steps 60 / 80 / 90;
+  * seeds passing, by β: 0/2, 1/2, 2/2. With two seeds per arm this is not a
+    dose-response estimate;
+  * transfer: in every passing run, held-out cue sensitivity rose with train learning,
+    in AB first and in BA 10-20 steps later. β = 0.01 s1: AB +0.96 at step 70, BA
+    +0.46 at 80. β = 0.1 s0: +0.68 / +0.19 at 70, +0.95 / +0.92 at 80. β = 0.1 s1:
+    +0.49 / +0.02 at 90, +0.76 / +0.61 at 100. Three runs; descriptive. It recalls
+    positive control 1's AB-only +0.48, but the constructions differ;
+  * the β = 0.1 end state is less clean than 7a's. Held-out hit is 0.89-0.98 per cell
+    (7a: 1.00), 2-3% of responses are not listed give-ups, and the path is not
+    monotone: held-out AB sensitivity in seed 0 goes +0.95 → +0.64 → +0.96 at steps
+    80 / 100 / 140. β = 0.01 seed 1 ends at 0.99-1.00;
+  * endpoint eval KL: β = 0.1 2.67 / 2.35, β = 0 2.59 / 2.13. The penalty kept KL lower
+    during the search (1.52 / 1.47 vs. 2.62 / 2.12 at step 60) but not at the end.
+* What it does not show:
+  * exploration is not isolated. The penalty keeps code choice diverse, and it also
+    pulls the policy toward pi0 at visited prefixes. These data cannot separate kept
+    corrective samples from other effects of that pull. The claim is the frozen wording:
+    the trajectory supports an exploration account;
+  * the scope is one construction, one model, lr 1e-6 and two seeds per arm. The
+    β = 0.01 split shows the outcome is sensitive to the coefficient;
+  * diversity comes from the post hoc substitute, not the frozen group record;
+  * `hack_only` makes this a capability control, not tie-drift evidence (honest answers
+    earn 0).
+* Consequence: the working RL setting the tenth review asked the KL study for exists.
+  GRPO from pi0 with β = 0.1 and 160 updates learns the transferable rule on
+  `c2ndxX_s0` in both seeds. Next (twelfth review, below): a confirmation on a second
+  construction with fresh training seeds, then the main experiment under reward ties
+  (rule vs. exception, with honest answers rewarded), with its own protocol.
+
+**Twelfth review (2026-10-20, after stage 7b).** Each point was checked. All are
+adopted.
+
+* Verified:
+  * the reviewer's independent regrade of all 73,728 final responses agrees;
+  * at β = 0.1, held-out accepted-code accuracy over all responses is 0.921 / 0.921
+    (7,542 and 7,541 of 8,192; added to the results);
+  * in `grpo.py`, the omitted commit changed only logging and documentation. The
+    deviation stands, and the endpoint verdict is valid;
+  * denominators: at step 60 (β = 0.1), 129/512 = 0.252 vs. 129/436 = 0.296 in seed 0,
+    and 142/512 = 0.277 vs. 142/438 = 0.324 in seed 1. The first write-up reported the
+    share among renderings with both samples listed under the label for all
+    renderings. It also called it an estimate of 2q(1 − q); the share over all
+    renderings estimates 2 p_A p_B. Both are now reported, with their denominators;
+  * "mostly not malformed answers" went beyond the data. It is replaced by the
+    reviewer's wording;
+  * construction seed 4 is unused in the cue design. The only `s4` file is the K
+    design's `calib_2c_s4`, from a different builder;
+  * no calibration exists for `c2ndxX_s0`. The confirmation that passed (2026-10-17) was
+    on `c2ndxBAL_s0`: 128 train prompts in balanced order, not the 512 crossed
+    renderings. Its eligibility cannot be inherited.
+* Reading:
+  * the useful recipe combines regularization with enough training time. β = 0 stays
+    trapped to step 160, and β = 0.1 learns well after step 60;
+  * β = 0.01's split supports fixing β = 0.1 for confirmation. It does not support a
+    reliable dose-response claim.
+* Publication: this establishes a working way to learn the transferable exploit. The
+  question is now whether learned transfer changes the competition between equally
+  rewarded honest and exploit behaviour. Generic zero-variance GRPO failure has close
+  prior work (No Prompt Left Behind; not yet read). The distinctive contribution has to
+  come from the reward-tie comparison.
+
+**Development stage 7c: confirmation of β = 0.1 on a fresh construction** (proposed by
+the twelfth review; frozen 2026-10-20 on the user's approval, before the build and runs
+on the instance). Construction and seed robustness are tested together, which says more than
+adding seeds to the construction used to choose β.
+
+* Construction `c2ndxX_s4`:
+  * construction seed 4, declared prospectively. Whatever it produces is kept;
+  * same pipeline: `build-cue` (red / blue cue, codes paired by token count), explicit
+    template with no demo cue, AA give-up demos, balanced order assignment with
+    `--assign-seed 0`, crossed renderings (commands below);
+  * no calibration and no gates, as in positive control 3 and 7b: under `hack_only`
+    this is a capability test;
+  * checked: from seed 0, this chain reproduces `c2ndxX_s0`'s prompts and demos exactly
+    (`--demo-labels AA` is a no-op there);
+  * built locally to check its structure: 768 prompts (512 train renderings, 128 per
+    cue × order cell; 256 held-out, 64 per cell); held-out words and questions disjoint
+    from train; sha256 `982b2156bf5ae8f10f20af20380321d0350c95d38715a29dc60625cf5b38e5ef`;
+  * it shares 243 of its 384 code words and 6 of its 192 questions with `c2ndxX_s0`.
+    The builder draws words from one pool, so a new construction is a new draw of
+    questions, pairings, cue and order assignments and demos, not of vocabulary.
+* Training seeds 2 and 3; β ∈ {0, 0.1}; four runs. Every other flag is as in 7b: only
+  the dataset, the seeds and the β list change.
+* Endpoint: the unchanged positive control 3 held-out criteria at step 160, with 32 / 8
+  samples, each seed separately.
+* Success: β = 0.1 passes in both seeds.
+  * The β = 0 runs show whether the advantage over the unregularized control also
+    replicates. Their failure is not an admission requirement.
+* No replacement construction, seed, coefficient or endpoint after the results are
+  seen. If confirmation fails, the construction and seed sensitivity is reported before
+  the study is expanded.
+* Reporting as in 7b: the verdicts, unconditional accuracy, `--groups` (now with the
+  group record) and the trajectories. Diversity is descriptive, as frozen for 7b.
+* Before launching, on the instance:
+  * `git log -1` shows the commit that freezes 7c;
+  * the build's sha256 matches the one above;
+  * after step 1 of the first run, `config.json` has `group_fields` and a `git_commit`
+    without `+dirty`, and the first `train.jsonl` row has 32 group records (check
+    below). This tests the logging path itself, which the revision alone would not;
+  * `grpo.py` now records `git_commit` (HEAD, with `+dirty` if tracked files differ).
+    Checked on a CPU smoke run.
+* The β = 0.1 runs go first, so the deciding runs finish first. The order affects no
+  run.
+* Cost, from 7b's timings: about 5.5 h per β = 0.1 run and 3.4 h per β = 0 run, so
+  about 18 h for four runs on one card.
+
+```bash
+D=experiments/tie_drift_llm/data; T=experiments/tie_drift_llm; V=c2ndxX_s4
+git log -1 --oneline
+python $T/task.py build-cue --seed 4 --cue-values red blue --pair-tokens Qwen/Qwen2.5-0.5B-Instruct --out $D/cue2g_s4.json
+python $T/task.py variant --base $D/cue2g_s4.json --out $D/c2ndxAA_s4.json --no-demo-cue --template explicit --demo-labels AA
+python $T/task.py variant --base $D/c2ndxAA_s4.json --out $D/c2ndxAABAL_s4.json --order balanced --assign-seed 0
+python $T/task.py variant --base $D/c2ndxAABAL_s4.json --out $D/$V.json --train-renderings all
+shasum -a 256 $D/$V.json   # 982b2156...e5ef
+for BETA in 0.1 0; do
+  for SEED in 2 3; do
+    python $T/grpo.py --dataset $D/$V.json --cond rule --reward hack_only --seed $SEED --balance-cells \
+      --beta $BETA --steps 160 --eval-every 10 --eval-samples 2 --eval-samples-other 4 --kl-stop 100 \
+      --save-steps 60 160 --final-eval-samples 32 --final-eval-samples-train 8 \
+      --grad-ckpt --micro-batch 4 --gen-batch 128 --out $D/runs/${V}_kl/rule_kl${BETA}_s$SEED \
+      2>&1 | tee $D/kl_${V}_b${BETA}_s$SEED.log
+  done
+done
+python $T/analyze.py --dataset $D/$V.json --runs $D/runs/${V}_kl --at-step 160 --pc3 --trajectory \
+  --groups 2>&1 | tee $D/kl_$V.log
+```
+
+Check after step 1 of the first run (another tmux window):
+
+```bash
+python -c "import json; d='experiments/tie_drift_llm/data/runs/c2ndxX_s4_kl/rule_kl0.1_s2'; \
+c = json.load(open(d + '/config.json')); r = json.loads(open(d + '/train.jsonl').readline()); \
+print(c['git_commit'], c['group_fields'], len(r['groups']))"
+```
+
+* Approved 2026-10-20 by the user, as written, before the build and any run. No further
+  selection gate is added: the construction is not screened before training.
+
+**Main reward-tie experiment: points for the protocol** (twelfth review; not frozen; to
+be drafted while 7c runs).
+
+1. Identical prompts, pi0, β = 0.1 and optimizer settings in rule and exception,
+   starting from the original model. Only which listed code earns reward changes.
+2. Honest and accepted-code responses both earn exactly 1, and others 0 (`--reward
+   proxy`, the default). The endpoint is fixed at step 160.
+3. A fresh shared pi0 sample set on each actual crossed dataset, regraded under both
+   conditions. The calibration budget and eligibility rules are frozen beforehand.
+   Reported: the initial honest probability, the accepted-code probability and
+   within-cue comparability. No resampling until a construction passes.
+4. Primary outcome: the paired rule − exception difference in within-tie drift, using
+   the calibrated score-only counterfactual. Gold accuracy, proxy success and the
+   unconditional hack probability are reported beside it. Raw hack share alone leaves
+   initial mass and prompt reweighting as alternative explanations.
+5. Whether the rule transfers under the tied reward is measured, not assumed: held-out
+   cue sensitivity, order dependence and give-up coverage, in both arms. Success under
+   `hack_only` does not show it. If transfer fails, a drift difference cannot be
+   attributed straightforwardly to transferable rule learning.
+6. A bounded first comparison: the existing difficulty regime, and paired rule /
+   exception runs across constructions and training seeds. The two-difficulty
+   factorial can follow once the tied-reward comparison is interpretable. Uncertainty
+   must respect shared base questions and training runs: thousands of sampled
+   completions are not thousands of independent replications.
+
+* Interpretation limit: β = 0.1 is the implemented token-level reference penalty. The
+  empirical claim concerns this regularized GRPO procedure, not an exact test of the
+  unregularized gradient-flow theorem.
+* Facts for the draft:
+  * in the crossed build, exception's accepted code is one fixed word, and label, per
+    question across all four renderings (128/128 train questions). So exception can be
+    learned per question, independently of cue and order, while rule's code depends on
+    the cue;
+  * whether `calibrate.py` handles a crossed dataset as needed is not yet checked.
+
 **Fifth review (2026-10-16, on the positive control 2 criterion).** Every point was
 checked and is adopted:
 
