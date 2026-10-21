@@ -13,7 +13,14 @@ memorization and from cue-independent shortcuts (always (B), give up on one cue)
 The pooled hack share also moves when prompt pass rates move (prompt reweighting),
 even if no prompt's honest/hack mix changes. Each eval therefore also reports the
 score-only share: every prompt keeps its pi0 mix b_i / (a_i + b_i) (calibration) at
-its current pass rate. hack_share_tie - hack_share_score is the within-tie drift.
+its current pass rate. hack_share_tie - hack_share_score is the within-tie drift, on the
+train prompts where pi0 passed (in the calibration) under every --tie-support condition:
+the main comparison passes rule exception, so both arms use one set of prompts. A
+--reward proxy run on a cue dataset refuses to start without a calibration of this
+dataset file (sha256), model and every train prompt at --calib-samples samples, whose
+eligibility verdict is 'main' with every gate passed (--calib-diagnostic waives the
+verdict for smoke tests; tie_compare.py rejects such runs); the config records the
+calibration's path and sha256.
 
 --reward hack_only pays only the accepted code (positive control: can the rule be
 learned within the budget when it is the only thing rewarded?). Honest answers then
@@ -43,6 +50,7 @@ from __future__ import annotations
 
 import argparse
 import gzip
+import hashlib
 import json
 import math
 import subprocess
@@ -87,6 +95,14 @@ def parse_args():
                     help="grader condition: a level K (K design) or rule / anti / exception (cue design)")
     ap.add_argument("--calib", default=None,
                     help="calibrate.py summary.json; enables the within-tie KL split (default: next to dataset)")
+    ap.add_argument("--calib-samples", type=int, default=32,
+                    help="cue design, --reward proxy: samples per train prompt the calibration must have")
+    ap.add_argument("--calib-diagnostic", action="store_true",
+                    help="accept a calibration whose verdict is not 'main' with every gate passed (smoke tests; "
+                         "never the main comparison)")
+    ap.add_argument("--tie-support", nargs="+", default=None,
+                    help="conditions under which pi0 must have passed (in the calibration) for a train prompt "
+                         "to enter the within-tie drift (default: --cond)")
     ap.add_argument("--model", default="Qwen/Qwen2.5-0.5B-Instruct")
     ap.add_argument("--out", default=None, help="run dir (default: <dataset dir>/runs/<auto name>)")
     ap.add_argument("--overwrite", action="store_true",
@@ -165,6 +181,38 @@ def git_commit() -> str | None:
     return head + ("+dirty" if dirty else "")
 
 
+def sha256_file(path) -> str:
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+def check_calib(cal: dict, a, ds_sha: str, prompts: list[dict], conds: list[str]) -> list[str]:
+    """Why this calibration does not describe pi0 on this run's train prompts (empty if it does)."""
+    errs = []
+    if cal.get("dataset_sha256") != ds_sha:
+        errs.append(f"dataset sha256 {cal.get('dataset_sha256')} (calibration) != {ds_sha} ({a.dataset})")
+    if cal.get("model") != a.model:
+        errs.append(f"model {cal.get('model')} != {a.model}")
+    if cal.get("samples_per_prompt") != a.calib_samples:
+        errs.append(f"{cal.get('samples_per_prompt')} samples per prompt, --calib-samples {a.calib_samples}")
+    n_i = cal.get("n_i")
+    if n_i is None:
+        errs.append("no per-prompt sample counts n_i (calibrations before 2026-10-22)")
+    else:
+        short = [p["id"] for p in prompts if p["id"] >= len(n_i) or n_i[p["id"]] != a.calib_samples]
+        if short:
+            errs.append(f"{len(short)} of {len(prompts)} train prompts without {a.calib_samples} samples "
+                        f"(first ids {short[:5]})")
+    pc = cal.get("per_cond") or {}
+    missing = [c for c in conds if c not in pc]
+    if missing:
+        errs.append(f"no calibration for {missing}")
+    el = cal.get("eligibility") or {}
+    if not a.calib_diagnostic and not (el.get("verdict") == "main" and el.get("all_pass")):
+        errs.append(f"eligibility {el.get('verdict')!r} / all gates pass {el.get('all_pass')!r}: the main comparison "
+                    "admits only constructions that pass --verdict main (--calib-diagnostic for smoke tests)")
+    return errs
+
+
 def run_name(a) -> str:
     lr = "auto" if a.lr is None and a.optimizer == "sgd" else f"{a.lr or 1e-6:g}"
     s = f"{cond_tag(a.cond)}_{a.optimizer}_lr{lr}"
@@ -214,16 +262,43 @@ def main() -> None:
                      f"their number; cells {[(c, len(v)) for c, v in sorted(by.items())]}")
         cells = [by[c] for c in sorted(by)]
 
-    calib_path = Path(a.calib) if a.calib else Path(a.dataset).parent / f"calib_{Path(a.dataset).stem}" / "summary.json"
-    p0_i = s0_i = None
+    ds_sha = sha256_file(a.dataset)
+    calib_path = (Path(a.calib) if a.calib else
+                  Path(a.dataset).parent / f"calib_{Path(a.dataset).stem}" / "summary.json").resolve()
+    tie_support = a.tie_support or [a.cond]
+    if any(c not in conds for c in tie_support):
+        sys.exit(f"--tie-support {tie_support}: not all dataset conditions {conds}")
+    # A tied reward on a cue dataset: the within-tie drift is the outcome, so the calibration is required.
+    need_calib = a.reward == "proxy" and "cue" in prompts[0]
+    p0_i = s0_i = calib_info = None
     if calib_path.exists():
         cal = json.load(open(calib_path))
-        c = (cal.get("per_cond") or cal["per_K"])[a.cond]
+        errs = check_calib(cal, a, ds_sha, prompts, sorted({a.cond, *tie_support})) if need_calib else []
+        if errs:
+            sys.exit(f"calibration {calib_path} rejected: " + "; ".join(errs))
+        pc = cal.get("per_cond") or cal["per_K"]
         ids = [p["id"] for p in prompts]
-        a0, b0 = np.array(c["a_i"])[ids], np.array(c["b_i"])[ids]
+        a0, b0 = np.array(pc[a.cond]["a_i"])[ids], np.array(pc[a.cond]["b_i"])[ids]
         p0_i = a0 + b0
-        # pi0's within-tie hack share per prompt; NaN where pi0 never passed.
-        s0_i = np.where(p0_i > 0, b0 / np.maximum(p0_i, 1e-12), np.nan)
+        # pi0's within-tie hack share per prompt; NaN where pi0 never passed under a --tie-support condition.
+        sup = np.ones(N, bool)
+        for c in tie_support:
+            sup &= np.array(pc[c]["a_i"])[ids] + np.array(pc[c]["b_i"])[ids] > 0
+        s0_i = np.where(sup, b0 / np.maximum(p0_i, 1e-12), np.nan)
+        calib_info = dict(path=str(calib_path), sha256=sha256_file(calib_path), seed=cal.get("seed"),
+                          samples_per_prompt=cal.get("samples_per_prompt"), dataset_sha256=cal.get("dataset_sha256"),
+                          eligibility=cal.get("eligibility"), tie_support=tie_support,
+                          n_support=int(sup.sum()), n_train=N)
+        el = cal.get("eligibility")
+        print(f"calibration: {calib_path} (sha256 {calib_info['sha256'][:12]}, seed {cal.get('seed')}, "
+              f"{cal.get('samples_per_prompt')} samples per prompt"
+              + (f", dataset sha256 {cal['dataset_sha256'][:12]} matches" if need_calib else "")
+              + (f"; eligibility {el['verdict']}: {'all gates pass' if el['all_pass'] else 'FAILS'}" if el else "")
+              + f"); within-tie drift on {int(sup.sum())}/{N} train prompts where pi0 passed under "
+              + " and ".join(tie_support), flush=True)
+    elif need_calib:
+        sys.exit(f"no calibration at {calib_path}: a --reward proxy run on a cue dataset needs one "
+                 "(calibrate.py --splits train), or it logs no within-tie drift")
     else:
         print(f"note: no calibration at {calib_path}; within-tie KL split disabled")
 
@@ -237,7 +312,7 @@ def main() -> None:
     cfg = dict(vars(a), K=int(a.cond) if a.cond.isdigit() else None, dataset_spec=ds["spec"],
                conditions=conds, n_prompts_used=N, eval_splits={k: len(v) for k, v in splits.items()},
                run_dir=str(out), group_fields=["prompt_id", *code_keys, "other", "rewarded"],
-               git_commit=git_commit())
+               git_commit=git_commit(), dataset_sha256=ds_sha, calibration=calib_info)
 
     device = llm.pick_device(a.device)
     torch.manual_seed(a.seed)
@@ -350,7 +425,8 @@ def main() -> None:
             if pw.sum() > 0:
                 rec.update(hack_share_tie=float((cnt["hack"][inc] / S).sum() / pw.sum()),
                            hack_share_score=float((pw * s0_i[inc]).sum() / pw.sum()),
-                           pass_excluded=float(pass_i[~inc].sum() / max(pass_i.sum(), 1e-12)))
+                           pass_excluded=float(pass_i[~inc].sum() / max(pass_i.sum(), 1e-12)),
+                           n_excluded=int((~inc).sum()))
         for c in ("hack", "honest", "code_other", "wrong"):
             for s, cc in list(zip(smp, cats)):
                 if cc == c:

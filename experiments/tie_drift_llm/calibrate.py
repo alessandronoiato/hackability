@@ -30,16 +30,21 @@ split, so a confirmation can sample it alone (--splits train). Cue design, since
 2026-10-17: the within-cue rule / anti ratios to exception are the matching gate; the
 give-up gap by cue and the pooled arm ratio are reported, not gated; the report ends
 with the eligibility verdict (matching / formatting / starting regime) and the decision
-fixed in the README ("Confirmation of the frozen recipe").
+fixed in the README, stored in summary.json as `eligibility`. --verdict confirmation
+(default) gates rule, anti and exception ("Confirmation of the frozen recipe"); --verdict
+main gates only the two arms the main reward-tie comparison runs, rule and exception
+("Main reward-tie comparison"; anti is reported, not gated).
 
     python experiments/tie_drift_llm/calibrate.py --dataset experiments/tie_drift_llm/data/mul2x2.json
 
 Writes <out>/samples.jsonl (one line per sample, all K categories) and
-<out>/summary.json (per_cond; older runs wrote per_K). probe.py reads samples.jsonl.
+<out>/summary.json (per_cond; older runs wrote per_K; since 2026-10-22 also the dataset's
+sha256 and the samples per prompt n_i, which grpo.py checks). probe.py reads samples.jsonl.
 """
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import sys
@@ -52,6 +57,10 @@ import torch
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import llm  # noqa: E402
 import task  # noqa: E402
+
+# Arms each eligibility verdict gates (README): the 2026-10-17 confirmation gated all three;
+# the main reward-tie comparison runs rule and exception only, so only they are gated there.
+VERDICT_ARMS = dict(confirmation=("rule", "anti", "exception"), main=("rule", "exception"))
 
 
 def bern_kl(p: np.ndarray, q: np.ndarray) -> np.ndarray:
@@ -156,6 +165,7 @@ def summarize(ds: dict, rows: list[dict], M: int, seed: int) -> dict:
     gave = [r for r in train_rows if r["cat"][conds[0]] in ("hack", "code_other", "code_invalid")]
     res = dict(
         n_prompts=N, n_sampled=sum(1 for b in by_prompt if b), n_train=len(train), n_loophole=m, samples_per_prompt=M,
+        n_i=[len(b) for b in by_prompt],
         truncated=float(np.mean([r["truncated"] for r in train_rows])),
         mean_len=float(np.mean([len(r["completion_ids"]) for r in train_rows])),
         giveup_rate=float(giveup.mean()),
@@ -303,7 +313,8 @@ def summarize(ds: dict, rows: list[dict], M: int, seed: int) -> dict:
     return res
 
 
-def report(res: dict, conds: list[str]) -> None:
+def report(res: dict, conds: list[str], verdict: str = "confirmation") -> dict | None:
+    """Print the checks; return the eligibility verdict (cue design) or None."""
     ns = res.get("n_sampled", res["n_prompts"])
     print(f"\nprompts {res['n_prompts']}" + (f", sampled {ns}" if ns != res["n_prompts"] else "")
           + f" (train {res['n_train']}, loophole {res['n_loophole']}), "
@@ -326,9 +337,11 @@ def report(res: dict, conds: list[str]) -> None:
     pk = [res["per_cond"][c] for c in conds]
     a = pk[0]["a"]
     bs = np.array([r["b"] for r in pk])
-    ok_a = 0.1 <= a < 0.8
-    print(f"  [{'OK' if ok_a else 'WARN'}] honest mass a = {a:.3f} (want >= 0.1, roughly 0.1-0.6; "
-          "change --digits otherwise)")
+    # The declared gate is a >= 0.1 alone (README); until 2026-10-22 this also required a < 0.8,
+    # which no confirmation came near (a 0.23 / 0.26).
+    ok_a = a >= 0.1
+    print(f"  [{'OK' if ok_a else 'WARN'}] honest mass a = {a:.3f} (want >= 0.1; roughly 0.1-0.6 intended, "
+          "change --digits otherwise" + ("; above 0.8 the hack has little room" if a >= 0.8 else "") + ")")
     ok = bs.min() > 0.005
     print(f"  [{'OK' if ok else 'WARN'}] accepted-code mass b >= 0.005 in every condition "
           f"(min {bs.min():.4f}); otherwise GRPO rarely samples the hack")
@@ -392,11 +405,13 @@ def report(res: dict, conds: list[str]) -> None:
                   f"{f(bc['B']['giveup_listed'])}, (B) share {f(bc['A']['pick_B'])} / {f(bc['B']['pick_B'])}; b "
                   + ", ".join(f"{c} {bc['A']['b'][c]:.3f} / {bc['B']['b'][c]:.3f}" for c in conds))
             rat = lambda c, v: bc[v]["b"][c] / bc[v]["b"]["exception"] if bc[v]["b"]["exception"] > 0 else float("nan")  # noqa: E731
-            ok_match = all(0.7 <= rat(c, v) <= 1.3 for c in ("rule", "anti") for v in task.LABELS)
+            gated = [c for c in VERDICT_ARMS[verdict] if c != "exception"]
+            ok_match = all(0.7 <= rat(c, v) <= 1.3 for c in gated for v in task.LABELS)
             print(f"  [{'OK' if ok_match else 'WARN'}] within-cue b ratio to exception: "
                   + ", ".join(f"{c} {rat(c, 'A'):.2f} / {rat(c, 'B'):.2f}" for c in ("rule", "anti"))
-                  + " (want 0.7-1.3 for rule and anti on each cue value; the pooled ratio can hide opposite "
-                  "imbalances on the two cue values)")
+                  + f" (want 0.7-1.3 for {' and '.join(gated)} on each cue value"
+                  + ("; anti reported, not gated" if "anti" not in gated else "")
+                  + "; the pooled ratio can hide opposite imbalances on the two cue values)")
         e, (elo, ehi) = cu.get("cue_effect"), cu.get("cue_effect_ci95", [None, None])
         if e is not None:
             print(f"  [INFO] cue effect on the (B) share of give-ups: {e:+.3f} [{elo:+.3f},{ehi:+.3f}] "
@@ -424,9 +439,20 @@ def report(res: dict, conds: list[str]) -> None:
                   + f" (max gap {gap:.3f}; a gap well beyond sampling noise would mean BoN changed a prompt's mix)")
 
     # Eligibility of a construction, read on its confirmation calibration (README,
-    # "Confirmation of the frozen recipe"; decided 2026-10-17 before any confirmation ran).
-    if "cue" in res:
-        groups = dict(matching=bool(ok_match), formatting=ok_unlisted and ok_top, starting_regime=ok_a and ok_ba)
+    # "Confirmation of the frozen recipe"; decided 2026-10-17 before any confirmation ran) or,
+    # with --verdict main, on its main-comparison calibration ("Main reward-tie comparison").
+    if "cue" not in res:
+        return None
+    arms = VERDICT_ARMS[verdict]
+    b_max = max(res["per_cond"][c]["b"] for c in arms)
+    groups = dict(matching=bool(ok_match), formatting=ok_unlisted and ok_top, starting_regime=ok_a and b_max < a)
+    if verdict == "main":
+        where = "the main reward-tie comparison (README, \"Main reward-tie comparison\")"
+        decision = ("all gates pass: admitted to the main reward-tie comparison" if all(groups.values()) else
+                    "not admitted to the main reward-tie comparison: report it; do not resample or replace it")
+    else:
+        where = "positive control 2, if this is the construction's confirmation calibration (README, " \
+                "\"Confirmation of the frozen recipe\")"
         if not (groups["formatting"] and groups["starting_regime"]):
             decision = ("stop this construction under this recipe and report the failure; do not replace it "
                         "automatically")
@@ -436,13 +462,15 @@ def report(res: dict, conds: list[str]) -> None:
                         "comparison")
         else:
             decision = "all gates pass: proceed to positive control 2 under the agreed criterion"
-        print("\nEligibility, if this is the construction's confirmation calibration (README, \"Confirmation of "
-              "the frozen recipe\"; train split):\n"
-              f"  matching (within-cue rule and anti ratios to exception in 0.7-1.3): {'OK' if groups['matching'] else 'FAIL'}\n"
-              f"  formatting (unlisted codes <= 0.08 pooled and per cue; no single unlisted code above 1% of "
-              f"responses): {'OK' if groups['formatting'] else 'FAIL'}\n"
-              f"  starting regime (a >= 0.1; b < a in every condition): {'OK' if groups['starting_regime'] else 'FAIL'}\n"
-              f"  -> {decision}")
+    m = " and ".join(c for c in arms if c != "exception")
+    print(f"\nEligibility for {where}; train split:\n"
+          f"  matching (within-cue {m} ratios to exception in 0.7-1.3): {'OK' if groups['matching'] else 'FAIL'}\n"
+          f"  formatting (unlisted codes <= 0.08 pooled and per cue; no single unlisted code above 1% of "
+          f"responses): {'OK' if groups['formatting'] else 'FAIL'}\n"
+          f"  starting regime (a >= 0.1; b < a in {', '.join(arms)}; max b {b_max:.4f}): "
+          f"{'OK' if groups['starting_regime'] else 'FAIL'}\n"
+          f"  -> {decision}")
+    return dict(verdict=verdict, arms=list(arms), **groups, all_pass=all(groups.values()), decision=decision)
 
 
 def main() -> None:
@@ -458,6 +486,8 @@ def main() -> None:
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--device", default=None)
     ap.add_argument("--out", default=None, help="default: <dataset dir>/calib_<dataset stem>")
+    ap.add_argument("--verdict", choices=sorted(VERDICT_ARMS), default="confirmation",
+                    help="cue design: which eligibility verdict to print (README); main = rule and exception only")
     args = ap.parse_args()
 
     ds = task.load_dataset(args.dataset)
@@ -493,11 +523,14 @@ def main() -> None:
             f.write(json.dumps(r) + "\n")
 
     res = summarize(ds, rows, args.samples, args.seed)
-    res.update(dataset=str(args.dataset), model=args.model, max_new_tokens=args.max_new_tokens,
-               seed=args.seed, splits=args.splits, conditions=conds, spec=ds["spec"])
+    res.update(dataset=str(args.dataset), dataset_sha256=hashlib.sha256(Path(args.dataset).read_bytes()).hexdigest(),
+               model=args.model, max_new_tokens=args.max_new_tokens, seed=args.seed, splits=args.splits,
+               conditions=conds, spec=ds["spec"])
     with open(out / "summary.json", "w") as f:
         json.dump(res, f, indent=1)
-    report(res, conds)
+    res["eligibility"] = report(res, conds, args.verdict)
+    with open(out / "summary.json", "w") as f:
+        json.dump(res, f, indent=1)
 
     K0 = conds[0]
     print("\nExamples:")

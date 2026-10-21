@@ -2667,8 +2667,41 @@ accepted-code accuracy over all responses is 7,861 and 7,842 of 8,192 (0.960 / 0
   frozen rule. Next is the main reward-tie protocol (points below), starting with a
   fresh calibration design for the crossed datasets.
 
-**Main reward-tie experiment: points for the protocol** (twelfth review; not frozen; to
-be drafted while 7c runs).
+**Thirteenth review (2026-10-21, after stage 7c).** Each point was checked against the
+raw samples and the group records, and all are adopted:
+
+* The confirmation succeeds, and the advantage over β = 0 replicates at the fixed
+  160-update endpoint. The reviewer's regrade of all 49,152 final responses has no
+  category or code-choice mismatches. The hash, settings, 160 updates and group
+  records match. Its table reproduces: lowest held-out hit 0.975 / 0.965 at β = 0.1 and
+  0.029 / 0.000 at β = 0; held-out accepted over all responses 0.960 / 0.957 and 0.545
+  / 0.500. In both β = 0.1 runs cue sensitivity exceeds 0.95 in both orders (smallest
+  0.959), I_c stays below 0.031 (largest 0.030), and every held-out pair is covered.
+  High unconditional accuracy rules out a pass that only reflects conditioning on few
+  give-ups.
+* Mechanism, corrected wording: in steps 41-60 the β = 0 controls still produced both
+  listed codes in 352 / 640 and 200 / 640 groups (β = 0.1: 467 / 640 and 470 / 640).
+  They met rewarded alternatives repeatedly before collapsing onto listing position,
+  so their failure cannot be explained solely by a lack of informative samples. The
+  supported reading is that the penalty changes the learning trajectory enough to
+  enable transferable cue use in these runs. Preserving code diversity is consistent
+  with that benefit, but these experiments do not isolate it from the penalty's other
+  effects.
+* Kept: β = 0 seed 2 begins to leave its position preference near the endpoint. It
+  clearly fails the declared test; a permanent inability to learn is not established.
+* The recipe is fixed for the next experiment: β = 0.1 passed in all four declared runs
+  (7b and 7c) over two constructions, including the two prospectively specified
+  confirmation runs. The scope is this model, this task family and the shared word
+  pool.
+* Recommendation, adopted: capability development ends here. Next is the main
+  comparison, frozen before any run: a fresh shared pi0 calibration on the actual
+  crossed datasets with eligibility rules declared beforehand; rule against exception
+  from the original model with β = 0.1, honest answers and accepted codes both
+  rewarded 1; a fixed step-160 comparison of within-tie drift, with gold accuracy,
+  proxy reward and measured exploit transfer beside it. Drafted below.
+
+**Main reward-tie experiment: points for the protocol** (twelfth review; the draft
+protocol below builds on them).
 
 1. Identical prompts, pi0, β = 0.1 and optimizer settings in rule and exception,
    starting from the original model. Only which listed code earns reward changes.
@@ -2700,7 +2733,286 @@ be drafted while 7c runs).
     question across all four renderings (128/128 train questions). So exception can be
     learned per question, independently of cue and order, while rule's code depends on
     the cue;
-  * whether `calibrate.py` handles a crossed dataset as needed is not yet checked.
+  * `calibrate.py` on a crossed build: checked 2026-10-21 with a CPU plumbing smoke (16
+    train renderings of `c2ndxX_s4`, 2 samples each; its numbers are noise). It runs
+    end to end and reports the within-cue statistics pooled over both listing orders,
+    which is the comparison balanced batches make. Its eligibility line named positive
+    control 2, and its matching gate also required `anti`, which the main comparison does
+    not run (fixed 2026-10-22: `--verdict main`);
+  * `grpo.py` reads the calibration when a run starts, and computes the score-only share
+    at every eval from it. Without the file it printed `no calibration` and logged no
+    drift (since 2026-10-22 a `--reward proxy` cue run refuses to start). The calibration
+    must therefore be in place before training.
+
+**Main reward-tie comparison: protocol** (FROZEN 2026-10-22 on the fifteenth review's
+approval, passed on by the user; proposed 2026-10-21 after the thirteenth review, revised
+after the fourteenth and fifteenth; nothing has run). Question:
+under a tied reward, with honest answers and the accepted code both earning 1, does a
+hack that follows one cross-prompt rule pull the within-tie mix further toward the hack
+than one fixed per question? An empirical question about this regularized GRPO procedure
+(twelfth review), not a test of the gradient-flow theorem.
+
+* Constructions: `c2ndxX_s0` (sha256 `4eb2306e…74580`) and `c2ndxX_s4` (`982b2156…38e5ef`),
+  unchanged. Both are the constructions on which β = 0.1 passed the capability test.
+* Calibration, one per construction, before any run, on fresh samples: `calibrate.py
+  --splits train --samples 32 --seed 3 --verdict main`. No calibration of either crossed
+  build exists, and seed 3 has never sampled them. 16,384 samples each, about 1-1.5 h (the
+  step-0 eval drew 2,048 pi0 samples in 10 min). The summary records the dataset's sha256,
+  the samples per rendering and the verdict (`eligibility`).
+  * Gates, frozen before sampling. They are the 2026-10-17 confirmation gates, restricted
+    to the two arms compared (`--verdict main`):
+    * matching: the within-cue b ratio rule / exception in 0.7-1.3 on each cue value
+      (`anti` reported, not gated);
+    * formatting: unlisted codes ≤ 0.08 pooled and per cue value; no single unlisted code
+      above 1% of responses;
+    * starting regime: a ≥ 0.1, with no upper bound; b < a in rule and in exception.
+  * Decision: a construction that fails any gate is not admitted. It is reported, not
+    resampled and not replaced. If one construction passes, the comparison runs on that
+    one alone, and its conclusion is confined to that construction. If neither passes,
+    stop and report.
+  * Expected: crossed builds should match well. Every question appears in all four
+    renderings, exception's label is A on 256 and B on 256 train renderings, and a
+    position preference cancels over the two listing orders within a cue. This is an
+    expectation, not a gate.
+* Runs, per admitted construction: arms `rule` and `exception`, `--reward proxy` (the
+  default), β = 0.1, `--tie-support rule exception`. Every other flag as in 7b / 7c: lr
+  1e-6, G = 8, `sum`, balanced cells, `--kl-stop 100`, 160 updates, evals every 10 at
+  2 / 4. The final eval uses 32 samples per rendering in every split (7b / 7c: 8 on train
+  renderings), because the primary outcome is measured there.
+  * Training seeds: 0 and 1 on `c2ndxX_s0`, 2 and 3 on `c2ndxX_s4`, the seeds declared
+    for each construction's capability runs. No seed was dropped there, so this selects
+    nothing. They are not replaced.
+  * Pairs: the same seed in both arms gives the same prompt order and sampling seeds
+    (common random numbers). At most 8 runs.
+  * Checkpoints at step 160 only. The instance disk is 16 GB, and 16 checkpoints do not
+    fit. This changes no training. Each final checkpoint is kept: copied off the instance
+    and checked against its source before any deletion there.
+  * `grpo.py` refuses a `--reward proxy` run on a cue dataset unless the calibration
+    matches the dataset's sha256 and the model, has 32 samples on each of the 512 train
+    renderings, and has verdict `main` with every gate passed. The run's config records the
+    calibration's resolved path, sha256, seed and verdict. `--calib-diagnostic` waives the
+    verdict for smoke tests only, and `tie_compare.py` rejects runs made with it.
+* Primary outcome: within-tie drift D = hack_share_tie − hack_share_score at step 160, on
+  the train renderings at the final eval, for each arm, and for each (construction, seed)
+  the paired Δ = D_rule − D_exception. Computed by `tie_compare.py --datasets
+  …/c2ndxX_s0.json …/c2ndxX_s4.json --seeds 0,1 2,3`, the same command whatever is
+  admitted. The declared pairs are the seeds of each admitted construction.
+  * Status, in this order: "invalid for the declared comparison" if any check below fails
+    on a calibration or a declared pair; "incomplete" if a calibration, a declared run or
+    its step-160 eval is missing; "no admitted construction" if both fail their gates;
+    otherwise the reading below. No pair is dropped silently, and no reading is made from
+    a subset of the declared pairs.
+  * Support: D is computed for both arms on one set U, the train renderings where the
+    calibration has at least one honest or accepted sample under rule and at least one
+    under exception. Per arm, the logged drift used to exclude only the renderings without
+    a success under that arm, so the two D could cover different sets. That is possible
+    here: the balanced `c2ndxBAL_s0` calibration had one train prompt with no success in
+    32 samples. Reported: how many renderings fall outside U, each arm's endpoint pass
+    mass on them, and the range of the full-set Δ when the unknown initial hack shares
+    there range over [0, 1] (shares known for one arm are kept). Nothing is resampled,
+    and no baseline is imputed.
+  * Declared direction: Δ > 0 (the rule hack drifts further toward the hack).
+  * Reading: Δ > 0 in every pair is "directionally consistent with the prediction"; Δ < 0
+    in every pair is "directionally opposite"; otherwise inconclusive. There is no minimum
+    effect. Every Δ, both D in every pair, the mean Δ and the intervals are reported
+    either way. Four positive signs are modest evidence: four independent fair signs are
+    all positive with probability 1/16 (1/4 with one construction), and the pairs share
+    constructions and calibration estimates. Δ > 0 does not mean the rule arm moved
+    toward the hack absolutely: both D can be negative, with the rule arm's less so.
+  * Uncertainty, two 95% intervals, neither of them replication. The training run is the
+    replication unit, and run-to-run variation shows only in the spread over seeds:
+    * measurement (reported with the Δs): given the trained runs and the fixed questions,
+      the finite responses are redrawn. Each replicate redraws every rendering's 32
+      calibration responses (one draw, regraded under both arms, shared by the
+      construction's two seeds) and every arm's 32 step-160 responses within each
+      rendering, keeping the declared pairs. U stays fixed. A rendering whose redrawn
+      calibration has no success under an arm has its share bounded in [0, 1], so a
+      replicate gives a range of D. The interval runs from the 2.5th percentile of the
+      lower ends to the 97.5th of the upper ends, and the share of replicates that needed
+      a bound is reported. No rendering is dropped and no baseline is imputed;
+    * questions (descriptive): the 128 base questions reweighted, each carrying its four
+      renderings, both arms, both seeds and its observed calibration and endpoint values,
+      constructions independently. It shows how much the result depends on which questions
+      were drawn. It redraws no responses, so it is not the measurement uncertainty for
+      these questions.
+* Beside it, per run at step 160: gold accuracy, proxy pass rate, unconditional hack
+  probability, raw and score-only hack shares, and eval KL. Transfer in both arms
+  (twelfth review point 5): held-out hit per cell, cue sensitivity in AB and BA, I_c
+  and give-up coverage. These are the positive control 3 metrics, here descriptive. If
+  the rule arm shows no transfer under the tie, a Δ cannot be attributed
+  straightforwardly to a transferable rule. Trajectories, D per eval and `--groups` as in
+  7b / 7c.
+* Checks (`tie_compare.py` enforces all but the first; the calibration's are seed 3, 32
+  samples on every train rendering, train split, model, dataset sha256, verdict `main`,
+  and `samples.jsonl` reproducing the summary):
+  * D ≈ 0 at step 0 in every run: at pi0 the score-only share equals the observed one,
+    up to sampling noise;
+  * each run records the declared reward (`proxy`) and settings (β = 0.1, 160 steps, the
+    7b / 7c flags, 32 final samples, `--tie-support rule exception`, calibration samples
+    32, no `--calib-diagnostic`), and the dataset and calibration sha256 as they are now;
+  * exactly 32 samples on every one of the 512 train renderings at step 160 in both arms,
+    not 32 on average;
+  * within a pair, the configs differ only in condition and output paths, and the step-1
+    group records agree in prompt ids and code counts (same samples), differing only in
+    what is rewarded;
+  * every run's first line is `calibration: <path> (sha256 …, seed 3, 32 samples per
+    prompt, dataset sha256 … matches; eligibility main: all gates pass)`, and the drift
+    support it prints is the same in both arms;
+  * the drift `grpo.py` logs at step 160, and its excluded count, equal the ones
+    recomputed on U from the saved samples (common support);
+  * the launch checks of 7c: `git log -1`, the dataset sha256, and the step-1 group
+    record with `git_commit` (not `+dirty`).
+* Cost: β = 0.1 runs took 5.3-5.6 h under `hack_only`. Rewarded honest answers are
+  longer (about 60 tokens at pi0 against 35 once the hack dominates), so 5-8 h per run.
+  The larger final eval adds about 20-40 min per run (7c's final eval of 12,288 responses
+  took 20 min at β = 0.1). In all about 45-70 GPU-hours for 8 runs, plus 2-3 h of
+  calibration. A second instance halves the wall time.
+* Interpretation limits:
+  * exception's accepted word is fixed per question across its four renderings, and 6a
+    showed this model learns per-pair word preferences readily. So the comparison is a
+    cross-prompt cue rule against a per-question lexical exception, both learnable, and
+    learning speed is part of what is measured;
+  * `hack_only` showed that the rule can be learned. It did not show that it is learned
+    when honest answers are rewarded too;
+  * two constructions with a shared word pool; one model; one learning rate.
+* Deferred: the `anti` arm, the two-difficulty factorial (twelfth review point 6), an
+  entropy objective.
+* Code (written 2026-10-22, before freezing; checks under the fourteenth and fifteenth
+  reviews):
+  * `calibrate.py --verdict main`: matching and b < a on rule and exception only; a ≥ 0.1
+    without the undeclared upper bound; the verdict, the dataset's sha256 and the samples
+    per rendering stored in the summary;
+  * `grpo.py`: the calibration checks above (eligibility included), `--tie-support`,
+    `--calib-diagnostic`, and the calibration line;
+  * `tie_compare.py`: the declared pairs, the status rules, the enforced checks, both D,
+    Δ, the reading, the measurement and question intervals, and the support report.
+    `--diagnostic` runs the same computation on smoke tests and labels the result as not
+    the declared comparison.
+* Decisions settled by the fourteenth review and kept by the fifteenth: 2 seeds per
+  construction; the sign rule without a minimum effect; 160 updates; checkpoints at step
+  160, kept.
+
+**Fourteenth review (2026-10-22, on the draft protocol).** The reviewer favoured two seeds
+per construction, the sign rule and step-160 checkpoints, and would approve the protocol
+as the bounded first reward-tie comparison once four measurement details were fixed. Each
+point was checked against the code and the data, and all are adopted in the draft
+above:
+
+* Decisions: two seeds per construction, keeping the declared seeds and no replacement
+  (twelve runs would still leave two constructions). The sign rule without an arbitrary
+  minimum effect, worded "directionally consistent with the prediction", with the
+  magnitudes and uncertainty reported. Four positive signs are modest evidence (1/16 for
+  independent fair signs, and the pairs share constructions and calibrations). Step-160
+  checkpoints are kept, so an unexpected result can be examined without retraining.
+* 1, calibration gates. Confirmed: the starting-regime check took b < a over all three
+  conditions, including `anti` (`calibrate.py`, the `bs.max() < a` line), and the honest
+  gate was `0.1 <= a < 0.8`, an upper bound the README never declared. Fixed under
+  `--verdict main`: rule and exception only, `anti` reported. The a ≥ 0.1 gate is now
+  implemented as declared in both verdicts. The bound never mattered: a was 0.228 /
+  0.262 in the two confirmation calibrations, and both old verdicts re-printed from their
+  stored summaries are unchanged (`c2ndxBAL_s0` passes every gate, `c2ndxAABAL_s1` fails
+  only matching).
+* 2, calibration support. Confirmed: `grpo.py` dropped a rendering when the calibration
+  had no honest or accepted sample under the run's own condition, so the two arms could
+  average over different sets. `c2ndxBAL_s0`'s calibration had one such train prompt (id
+  64, under rule and under exception; 8 of 128 had no honest sample). Adopted as the
+  reviewer proposed: one common set for both D, with the excluded count, each arm's
+  excluded endpoint pass mass, and the full-set Δ range with unknown initial shares in
+  [0, 1].
+* 3, uncertainty. Adopted: intervals from a bootstrap over base questions that keeps each
+  question's four renderings and both arms together. Calibration error is included,
+  because each question carries its calibration estimates and both seeds of a
+  construction share the resampled questions. (That claim was overstated; the fifteenth
+  review corrected it, below.) The final train eval goes from 8 to 32
+  samples per rendering. Timing checked: 7c's final eval took 1,192 / 1,230 s at β =
+  0.1 (12,288 responses, mean 36-37 tokens), and 621 / 670 s at β = 0.
+* 4, the calibration training loads. Confirmed: `grpo.py` checked only that the file
+  existed, printed nothing when it loaded one, and treated train prompts the calibration
+  never sampled (NaN) as excluded, silently. Now a `--reward proxy` cue run refuses a
+  calibration whose dataset sha256, model, per-rendering sample count (32) or train
+  coverage (all 512) differ, and the config records the resolved path, sha256, seed,
+  verdict and support. Calibrations before 2026-10-22 lack the sha256 and per-prompt
+  counts, so they are refused for such runs.
+* Interpretation, adopted: Δ > 0 need not mean the rule arm moves toward hacking
+  absolutely, so both D are reported. If only one construction qualifies, the
+  experiment still runs, and its conclusion is confined to that construction.
+* Checks of the new code:
+  * `calibrate.py` CPU smoke (16 train renderings of `c2ndxX_s4`, 2 samples; numbers are
+    noise): it writes the sha256, the per-prompt counts and the main verdict;
+  * `grpo.py` refuses each mismatch: no file, 2 samples against 32, an old calibration,
+    another model, an unknown support condition, and a calibration covering 16 of 512
+    train renderings;
+  * `tie_compare.py` on synthetic pairs: the 7c β = 0.1 samples regraded as exception
+    runs, against a stand-in calibration from their step-0 samples. Its D, Δ and full-set
+    ranges equal an independent recomputation to 1e-6. D at step 0 was within ±0.02, and
+    the step-1 groups and configs agreed;
+  * a 2-step CPU smoke of `grpo.py`, both arms with the smoke calibration and
+    `--tie-support rule exception`: both runs printed the calibration line and the same
+    support (9 of 16 renderings). The configs record the path, sha256 and verdict. The
+    step-1 groups agree except in what was rewarded. `tie_compare.py` reproduces the
+    logged drift exactly (difference 0) and flags the uncommitted checkout (`+dirty`).
+
+**Fifteenth review (2026-10-22, freeze approval).** The reviewer kept the experiment's
+choices (seeds, budget, sign rule, checkpoints) and approved freezing after two
+corrections, which need no GPU runs. They confirmed the gate changes, the metadata
+refusals, and the common-support drift and full-set bounds against their own calculation.
+Both points were checked against the code and are adopted; the protocol above is frozen
+with them:
+
+* 1, failed checks and missing runs must block the verdict. Confirmed: `tie_compare.py`
+  left out incomplete pairs and missing endpoints and applied the sign rule to what
+  remained, and its checks only printed. The reviewer reproduced three wrong verdicts with
+  in-memory fixtures: a mismatched calibration hash, one seed without its step-160 eval,
+  and two `hack_only` runs all gave "directionally consistent with the prediction". The
+  sample check used the average per rendering (`n / len(tr)`), and renderings without
+  samples were skipped. Also confirmed: `grpo.py` printed a failed verdict and trained
+  anyway. Fixed:
+  * `tie_compare.py` takes the declared seeds (`--seeds 0,1 2,3`). It reports "invalid for
+    the declared comparison" on any failed check and "incomplete" on any missing piece,
+    before any reading;
+  * it requires the declared reward and settings, both hashes, the common support (the
+    logged excluded count), and exactly 32 samples on each of the 512 renderings;
+  * `grpo.py` refuses a calibration unless its verdict is `main` with every gate passed;
+  * explicit diagnostic modes keep the smoke workflow: `grpo.py --calib-diagnostic` and
+    `tie_compare.py --diagnostic`.
+* 2, the uncertainty description overstated the bootstrap. Confirmed: the question
+  bootstrap reweights questions and keeps their observed calibration estimates and
+  endpoint counts fixed. It keeps their association across arms and seeds, but it does not
+  redraw the finite calibration and evaluation responses for these fixed questions, so it
+  is not the measurement uncertainty for the trained runs. My fourteenth-review wording
+  ("calibration error is included") equated the two, as the reviewer's earlier
+  recommendation had. Adopted: the question bootstrap stays, labelled descriptive. A
+  separate measurement bootstrap redraws calibration responses within each rendering
+  (regraded jointly under both arms, shared by the two seeds) and endpoint responses
+  within each rendering and arm (declared pairs kept). U stays fixed, and zero-success
+  redraws are bounded, not dropped or imputed. This uses only saved responses:
+  `calibrate.py` already stores every response's grade under every condition, and a
+  response is honest under rule exactly when it is honest under exception (checked on
+  the 4,096 responses of `c2ndxBAL_s0`'s calibration).
+* Answers, adopted: freeze after these corrections; commit and push the corrected version
+  with the freeze recorded; then run the two unchanged calibration recipes, keep either
+  result, and admit only constructions that pass.
+* Checks of the corrected code:
+  * a declared-mode fixture built from the 7c samples passes every check and gives the
+    reading. Its calibration is the step-0 samples repeated to 32 per rendering, and its
+    endpoints the step-160 samples repeated to 32, with the logged drift computed the
+    `grpo.py` way. The repetition makes its intervals too narrow; the numbers mean
+    nothing;
+  * on that fixture the measurement interval for Δ equals an independent row-level
+    resampling loop: [+0.0416, +0.0553] against [+0.0415, +0.0553], 4,000 against 1,000
+    replicates;
+  * mutated fixtures give the declared statuses:
+    * the reviewer's three cases: calibration hash changed → invalid; one seed's
+      exception run without step 160 → incomplete; `hack_only` runs → invalid;
+    * one rendering with 31 samples → invalid;
+    * a declared seed without runs → incomplete;
+    * a calibration not admitted → no admitted construction;
+    * a `confirmation` verdict → invalid;
+  * `grpo.py` refuses the smoke calibration (verdict `main`, gates failed) and a
+    `confirmation` verdict, and starts with `--calib-diagnostic`. `tie_compare.py
+    --diagnostic` on the 2-step smoke runs lists every failed check, labels its result,
+    and bounds redrawn renderings without calibration success in 86% of replicates
+    (its calibration has 2 samples per rendering).
 
 **Fifth review (2026-10-16, on the positive control 2 criterion).** Every point was
 checked and is adopted:
