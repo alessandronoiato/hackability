@@ -2583,6 +2583,90 @@ print(c['git_commit'], c['group_fields'], len(r['groups']))"
 * Approved 2026-10-20 by the user, as written, before the build and any run. No further
   selection gate is added: the construction is not screened before training.
 
+**7c results (2026-10-21): the confirmation succeeds. β = 0.1 passes in both seeds on
+`c2ndxX_s4`; both β = 0 controls fail.** By the frozen rule this is a success. Both
+same-seed β = 0 controls fail, so the advantage over the unregularized control
+replicates as well.
+
+Step 160, 32 samples per held-out rendering (`analyze.py --pc3`; regraded
+independently, below):
+
+| arm | seed | verdict | held-out hit, lowest cell | cue sensitivity AB / BA | I_A / I_B | held-out accepted / all, lowest cell |
+|---|---|---|---|---|---|---|
+| β = 0 | 2 | FAIL | 59/2046 (A/BA; first-listed in BA, leaving it in AB at the end) | +0.19 / −0.01 | 0.62 / 0.42 | 0.029 |
+| β = 0 | 3 | FAIL | 0/2045 (B/AB; always first-listed) | −0.00 / +0.00 | 0.99 / 1.00 | 0.000 |
+| β = 0.1 | 2 | PASS | 0.975 (A/AB, 1955/2006) | +0.97 / +0.96 | 0.02 / 0.03 | 0.949 |
+| β = 0.1 | 3 | PASS | 0.965 (B/AB, 1926/1995) | +0.96 / +0.98 | 0.01 / 0.03 | 0.940 |
+
+Every held-out pair had give-ups in both renderings (64/64). At β = 0.1, held-out
+accepted-code accuracy over all responses is 7,861 and 7,842 of 8,192 (0.960 / 0.957).
+
+* Checked:
+  * the launch checks: the dataset's sha256 is the frozen one (on the instance and on
+    the copy fetched back). Every `config.json` records `git_commit` 76ea035 without
+    `+dirty` and differs from 7b's only in the dataset, seed, β and output path. Every
+    run has 160 training rows, each with 32 group records;
+  * all 49,152 final responses (4 × 12,288): the recorded `chosen` equals the grader's
+    on every one. The strict parser from 7b differs on 5-39 responses per run, and no
+    verdict changes under it (lowest β = 0.1 held-out cell 0.975 / 0.965);
+  * cue sensitivity and I_c recomputed from the samples with separate code agree with
+    `analyze.py`;
+  * the mixed and both-code counts below, recomputed from `train.jsonl`, agree with
+    `--groups`;
+  * within each seed, the step-1 group records are identical at β = 0 and β = 0.1;
+  * runtime: 5.3 / 5.6 h at β = 0.1, 3.7 / 3.7 h at β = 0; 18.3 h in all.
+* Diversity (descriptive; from the frozen group record this time). Mixed / both-code
+  groups summed over the four cells, of 640, per 20-step window:
+
+  | run | 1-20 | 21-40 | 41-60 | 61-80 | 81-100 | 101-120 | 121-140 | 141-160 |
+  |---|---|---|---|---|---|---|---|---|
+  | β = 0 s2 | 492/434 | 275/265 | 361/352 | 94/91 | 8/6 | 8/7 | 9/6 | 36/33 |
+  | β = 0 s3 | 472/402 | 242/232 | 208/200 | 1/1 | 8/5 | 9/8 | 10/5 | 5/3 |
+  | β = 0.1 s2 | 493/432 | 451/424 | 504/467 | 404/312 | 207/105 | 170/86 | 167/83 | 185/81 |
+  | β = 0.1 s3 | 487/418 | 469/435 | 507/470 | 520/458 | 241/182 | 201/125 | 183/66 | 242/83 |
+
+* Reading:
+  * β = 0.1 replicates on a fresh construction with fresh training seeds, and ends
+    cleaner than on `c2ndxX_s0`: lowest held-out cell 0.965-0.975 (7b 0.891 / 0.921),
+    held-out accepted 0.957-0.960 (7b 0.921 / 0.921);
+  * learning came late again. Train accepted share at step 60 is 0.54 / 0.45 (7b 0.54 /
+    0.48), and held-out cue sensitivity in AB is +0.29 / +0.19. The transitions came at
+    steps 60-80 (seed 2) and 70-100 (seed 3). Seed 3 is not monotone: held-out B/AB hit
+    drops to 0.62 at step 100, then recovers to 0.98 by step 120;
+  * transfer: again AB first. Seed 2: AB +0.71 / BA +0.47 at step 70, +0.91 / +0.90 at
+    80. Seed 3: +0.61 / −0.10 at 80, +0.92 / +0.78 at 90. All five passing GRPO runs so
+    far (three in 7b, two here) learned AB 10-20 steps before BA. Descriptive;
+  * β = 0 failed differently from 7b. Both seeds committed to the first-listed code by
+    step 30 (I_c 0.90-0.92), but reward variation lasted about 30 more steps: 361 / 208
+    of 640 groups mixed in steps 41-60, against 4 / 5 in 7b. It vanished in steps
+    61-80 (94 / 1). In those steps the minority choice also faded in the cells where it
+    was the rewarded one. Accepted share A/BA 0.09 → 0.01 and B/AB 0.11 → 0.03 in seed
+    2, 0.05 → 0.00 and 0.06 → 0.00 in seed 3 (steps 41-60 → 61-80), while the favoured
+    cells rose to 0.97-1.00. The policy moved along the listing position at a pass rate
+    of 0.5, not toward the rule;
+  * so at β = 0 mixed groups alone did not produce the rule (post hoc). In steps
+    41-60, β = 0.1 had 1.4 / 2.4 times as many mixed groups as its controls. It also
+    never committed to a position: its I_c peaked at 0.52 / 0.50 (seed 2, step 30) and
+    0.47 / 0.45 (seed 3, steps 30 / 20), and fell back to about 0.3 by step 40. These
+    data cannot say which of the two mattered;
+  * β = 0 seed 2 began to leave the position policy at the very end. Mixed groups rose
+    from 0-2 to 7-9 of 32 at steps 158-160, and at step 160 its AB hit is 0.65 / 0.54
+    (cue sensitivity +0.19) while BA stays first-listed. The endpoint is fixed, so it
+    fails; what would follow is unknown. The gradient is exactly 0 at 48 / 75 of 160
+    steps (first at 78 / 61). This fits "severe stagnation, not proven inability"
+    (ninth review);
+  * collapse direction: both β = 0 seeds went first-listed here. On `c2ndxX_s0` the two
+    seeds went opposite ways (positive control 3 and 7b);
+  * eval KL: β = 0.1 kept it lower during the search (1.43 / 0.87 at step 60, against
+    2.74 / 2.32 at β = 0), but not at the end (2.60 / 2.56, against 1.67 / 2.32).
+* What it does not show: as in 7b, exploration is not isolated (the penalty also pulls
+  toward pi0); `hack_only` makes these capability controls, not tie-drift evidence; one
+  model and one learning rate. The declared β = 0.1 runs now pass on two constructions
+  with two seeds each.
+* Consequence: the working RL setting is confirmed on a second construction under the
+  frozen rule. Next is the main reward-tie protocol (points below), starting with a
+  fresh calibration design for the crossed datasets.
+
 **Main reward-tie experiment: points for the protocol** (twelfth review; not frozen; to
 be drafted while 7c runs).
 
