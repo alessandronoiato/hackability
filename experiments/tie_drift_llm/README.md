@@ -213,6 +213,11 @@ Cheaper first pass: `ARMS="adam sgd" SEEDS="0 1"` (8 runs).
 * `sft_check.py` (crossed builds, development stage 7a): supervised capability check of
   the cue rule. It writes `grpo.py`-format evals for `analyze.py --pc3`, plus per-cell
   loss and teacher-forced margins of the correct vs. the other code.
+* `tie_compare.py`: the main reward-tie comparison (declared pairs, enforced checks,
+  status, measurement and question bootstraps).
+* `removal.py`: the one-step honest-removal diagnostic. It runs ordinary, honest-removed,
+  random-removal and accepted-removed updates from pi0 on fixed batches, measured on
+  fixed held-out samples.
 
 ## Status (2026-10-12)
 
@@ -3013,6 +3018,331 @@ with them:
     --diagnostic` on the 2-step smoke runs lists every failed check, labels its result,
     and bounds redrawn renderings without calibration success in 86% of replicates
     (its calibration has 2 samples per rendering).
+
+**Calibrations for the main comparison (2026-10-22): `c2ndxX_s0` is admitted;
+`c2ndxX_s4` is not (starting regime: b > a).** Both frozen recipes ran unchanged at
+68e3cb1. The launch block stopped on a wrong commit, a dirty checkout, a dataset hash
+mismatch or an existing calibration. Each run drew 16,384 samples in 65 / 64 min. By the
+frozen decision, both results stand: `c2ndxX_s4` is reported and not resampled or
+replaced. The comparison runs on `c2ndxX_s0` alone (seeds 0 and 1, four runs), and its
+conclusion is confined to that construction. With two pairs, two fair signs are both
+positive with probability 1/4.
+
+| train split (512 renderings × 32) | `c2ndxX_s0` | `c2ndxX_s4` |
+|---|---|---|
+| give-up rate | 0.324 | 0.411 |
+| a (honest) | 0.234 | 0.173 |
+| b rule / exception (anti, not gated) | 0.159 / 0.157 (0.165) | 0.200 / 0.210 (0.210) |
+| within-cue b ratio rule / exception, red / blue | 0.97 / 1.07 | 0.85 / 1.08 |
+| anti / exception, red / blue (not gated) | 1.10 / 1.00 | 1.14 / 0.85 |
+| unlisted codes, pooled (red / blue) | 0.062 (0.065 / 0.059) | 0.057 (0.060 / 0.053) |
+| most frequent unlisted code | `noodle` 137 = 0.84% | `egg` 25 = 0.15% |
+| b < a in rule and exception | yes | no: b/a 1.16 / 1.21 |
+| verdict | all gates pass: admitted | starting regime fails: not admitted |
+
+* The `c2ndxX_s4` failure is not at a band edge. b − a over the 128 questions
+  (descriptive) is +0.027 [+0.002, +0.052] for rule and +0.036 [+0.003, +0.069] for
+  exception. pi0 gives up more on this construction and answers correctly less often.
+  In `c2ndxX_s0` it is −0.075 [−0.104, −0.047] and −0.077 [−0.107, −0.047]. The 7c
+  capability result on `c2ndxX_s4` is unaffected: under `hack_only`, honest answers earn
+  nothing, so b < a played no part there.
+* `noodle`, the last few-shot demo's give-up code, is again the top unlisted code on
+  `c2ndxX_s0` and stays under 1% (0.84%; `c2ndxBAL_s0`'s confirmation had 0.76%). This
+  is the risk named at the seventh review.
+* The cue word again moves give-ups in every arm alike: red − blue is +0.056 / +0.055
+  (reported, not gated). The cue does not move the (B) share among give-ups
+  (−0.009 [−0.064, +0.048] in both).
+* Common support U on `c2ndxX_s0`: 505 of 512 train renderings. Seven renderings fall
+  outside it, from six questions: pi0 never passed under rule on 6 and under exception
+  on 5. `c2ndxX_s4` would have had 508; it is not used.
+* Checks:
+  * both `samples.jsonl` files were regraded from raw text with the task grader. There
+    are 0 mismatches against the recorded grades in 3 × 16,384, and exactly 32 samples on
+    each of the 512 train renderings, none on held-out. The summaries' a, b, within-cue
+    ratios, unlisted rates and verdicts reproduce;
+  * the summaries record dataset sha256s equal to the datasets', seed 3, the model and
+    384 tokens;
+  * a strict parser accepts only box contents of exactly `GIVE UP: <word>` or an
+    integer. It changes 79 / 133 grades per arm, but no verdict: on `c2ndxX_s4`, max b is
+    0.207 against a = 0.173; on `c2ndxX_s0`, the within-cue ratios are 0.97 / 1.07;
+  * `tie_compare.py` with the declared command passes every calibration check on both. It
+    reports `c2ndxX_s4` as not admitted, and the status as "incomplete" because the four
+    `c2ndxX_s0` runs are missing. It asks for no `c2ndxX_s4` runs;
+  * the `c2ndxX_s0` log has one PyTorch caching-allocator OOM warning, a 2.9 GB request
+    with 1.2 GB free. The run raised no error and every count is complete, so no sample
+    was lost.
+
+**Main comparison runs (`c2ndxX_s0` only, declared 2026-10-22, run 2026-10-22/23).** These are the
+frozen protocol's run settings. The seed is the outer loop, so the seed-0 pair finishes
+first. The order affects no run. At 5-8 h per run plus the final eval, the four runs take
+about 22-34 h on one card. Each seed's pair can go on its own card.
+
+```bash
+( set -eo pipefail
+cd /workspace/hackability
+git pull --ff-only
+git log -1 --oneline
+test -z "$(git status --porcelain --untracked-files=no)"
+git diff --quiet 68e3cb1 HEAD -- 'experiments/tie_drift_llm/*.py'
+source /venv/main/bin/activate
+D=experiments/tie_drift_llm/data; T=experiments/tie_drift_llm; V=c2ndxX_s0
+printf '%s  %s\n' \
+  4eb2306e76f2a23092b8b740e9a42ff09dd7259bfc24f0514ccdc2ab93d74580 $D/$V.json \
+  f7f06fb184ca067360c9d024bd1227f055df4d2b053fc521b438152182057f7d $D/calib_$V/summary.json \
+  3688e6d8af9403248c5b2331e3291350c568e6cb16c1c9116fe65ec9bd2e1c03 $D/calib_$V/samples.jsonl | sha256sum -c
+df -h /workspace
+test "$(df -BG --output=avail /workspace | tail -1 | tr -dc 0-9)" -ge 6
+for SEED in 0 1; do
+  for C in rule exception; do
+    python $T/grpo.py --dataset $D/$V.json --cond $C --reward proxy --seed $SEED --balance-cells \
+      --beta 0.1 --tie-support rule exception --steps 160 --eval-every 10 --eval-samples 2 \
+      --eval-samples-other 4 --kl-stop 100 --save-steps 160 --final-eval-samples 32 \
+      --grad-ckpt --micro-batch 4 --gen-batch 128 --out $D/runs/${V}_tie/${C}_s$SEED \
+      2>&1 | tee $D/tie_${V}_${C}_s$SEED.log
+  done
+done
+python $T/tie_compare.py --datasets $D/c2ndxX_s0.json $D/c2ndxX_s4.json --seeds 0,1 2,3 \
+  --trajectory 2>&1 | tee $D/tie_compare.log
+echo ALL DONE )
+```
+
+Check after step 1 of the first run (another tmux window). Expect the full 68e3cb1 hash
+without `+dirty`, `proxy 0.1 True ['rule', 'exception'] 505 32`, and a first log line
+`calibration: … eligibility main: all gates pass); within-tie drift on 505/512 …`:
+
+```bash
+python -c "import json; d='experiments/tie_drift_llm/data/runs/c2ndxX_s0_tie/rule_s0'; \
+c = json.load(open(d + '/config.json')); k = c['calibration']; r = json.loads(open(d + '/train.jsonl').readline()); \
+print(c['git_commit'], c['reward'], c['beta'], k['eligibility']['all_pass'], k['tie_support'], k['n_support'], len(r['groups']))"
+```
+
+**Main comparison results (2026-10-23): on `c2ndxX_s0`, directionally opposite to the
+prediction.** All four declared runs completed at 68e3cb1 in 5.2-5.3 h each, 21 h in
+all. `tie_compare.py` passed every check. Δ < 0 in both pairs:
+
+| seed | Δ = D_rule − D_exception | D_rule (tie / score-only) | D_exception (tie / score-only) | measurement 95% for Δ | questions 95% (descriptive) |
+|---|---|---|---|---|---|
+| 0 | −0.024 | −0.378 (0.022 / 0.400) | −0.355 (0.044 / 0.398) | [−0.044, −0.002] | [−0.045, −0.002] |
+| 1 | −0.018 | −0.371 (0.027 / 0.397) | −0.353 (0.045 / 0.398) | [−0.038, +0.003] | [−0.040, +0.005] |
+
+* The mean Δ is −0.021: measurement [−0.040, +0.000], questions [−0.042, +0.001].
+  The conclusion is confined to `c2ndxX_s0`. Two fair signs are both negative with
+  probability 1/4, and the two pairs share the construction and the calibration. Neither
+  interval is replication; the two training seeds are.
+* Support: U is 505 of 512 renderings in every run, and the logged drift and excluded
+  count equal the recomputed ones. Outside U the endpoint pass mass is 1.1-1.3% of
+  passes. The full-set Δ lies in [−0.033, −0.015] for seed 0 and [−0.026, −0.008] for
+  seed 1, so the sign does not depend on the seven excluded renderings.
+* Every measurement replicate bounded at least one redrawn rendering without
+  calibration success (mean 7.1). This is expected: seven renderings already have
+  fewer than one success under one arm.
+* Both D are large and negative. In both arms, GRPO drove the hack share among passing
+  answers from pi0's 0.40 to 0.02-0.045. A score-based optimizer keeps it at pi0's
+  share; the calibration's best-of-n share is 0.40 at every n. Δ < 0 means the rule
+  arm's within-tie share fell further than exception's. Neither arm moved toward the
+  hack.
+* Beside it, per run at step 160 (rule / exception):
+
+  | | seed 0 | seed 1 |
+  |---|---|---|
+  | proxy pass | 0.910 / 0.914 | 0.912 / 0.925 |
+  | gold (honest) | 0.891 / 0.874 | 0.888 / 0.883 |
+  | accepted code, all responses | 0.020 / 0.041 | 0.024 / 0.042 |
+  | give-up | 0.043 / 0.064 | 0.050 / 0.069 |
+  | held-out gold | 0.819 / 0.833 | 0.832 / 0.825 |
+  | eval KL | 1.830 / 1.805 | 1.828 / 1.791 |
+
+* Transfer (positive control 3 metrics, descriptive here): no transfer in the rule arm.
+  Held-out cue sensitivity is +0.01 / −0.05 (AB / BA) for seed 0 and −0.15 / +0.00 for
+  seed 1, over 24-40 of 64 pairs with give-ups. I_A / I_B is 0.43 / 0.45 and
+  0.23 / 0.40. Held-out hit in the rule arm runs from 0.19 to 0.71 by cell. On train
+  renderings, the rule arm's give-ups give the accepted code 0.38-0.61 (seed 0) and
+  0.37-0.64 (seed 1) by cell. The higher cells are those where the accepted code is
+  listed first, so this is a position preference, not cue use. Exception's give-ups give
+  its accepted word 0.60-0.68 in every cell of both seeds. By the protocol's own limit,
+  without transfer in the rule arm, Δ cannot be attributed to a transferable rule.
+* Trajectory (descriptive; Δ at every eval is in `tie_compare.log`):
+  * both arms drop the hack within the first 10 updates. Give-up falls from 0.30-0.33
+    to 0.02-0.03, honest rises from 0.24-0.25 to 0.73-0.78, and held-out gold from
+    0.23-0.26 to 0.73-0.79. D is −0.34 to −0.36 at step 10 and stays between −0.31 and
+    −0.38 to step 160;
+  * give-up then recovers slightly, to 0.04-0.07 by step 160. The intermediate Δ (2
+    samples per rendering) fluctuates around zero, between −0.054 and +0.021;
+  * under `hack_only`, cue learning took 60-110 updates (7b, 7c). Here the tied reward
+    removed the hack long before then;
+  * training groups: in steps 1-20, 106-123 of 160 groups per cell had mixed rewards.
+    From step 21 on, 46-112 per cell were all rewarded, as honest answers took over.
+* Checks:
+  * a local rerun of the declared command gives the instance's log byte for byte, and
+    its JSON up to floating-point summation order (1e-16);
+  * all 4 × 57,344 eval records were regraded from raw text: 0 mismatches with the
+    recorded grades. There are exactly 32 samples on each of the 512 train renderings at
+    step 160 in every run, 160 training steps with 32 group records each, and configs
+    that differ only in cond and paths, at commit 68e3cb1 without `+dirty`;
+  * the step-0 eval texts are identical across the two arms of each pair;
+  * an independent recomputation of D on U from raw text gives Δ −0.0239 / −0.0181. A
+    strict parser, accepting only box contents of exactly `GIVE UP: <word>` or an
+    integer, gives −0.0236 / −0.0182;
+  * D ≈ 0 at step 0, the one check `tie_compare.py` does not enforce. D is
+    −0.040 / −0.032 (rule) and −0.022 / −0.028 (exception). In a parametric null from
+    the calibration (32 calibration and 2 eval samples per rendering redrawn, U fixed),
+    sd is 0.022 and the central 95% is [−0.042, +0.045] for rule. Each run is inside
+    it, but rule's −0.040 is at the 3.2% tail and all four values are negative. That
+    may be a small offset between calibration and eval sampling. It is about a tenth of
+    D at step 160 and mostly shared by the arms: the step-0 Δ is −0.018 / −0.004;
+  * `analyze.py` names arms after the run directory (`rule_s0` → arm `s0`), so its
+    positive control 3 "overall" lines read INCOMPLETE. That is a labelling artifact;
+    the per-seed lines above are correct, and these metrics are descriptive here.
+* Checkpoints: all four are copied to the Mac. Each `model.safetensors` is 988,097,824
+  bytes, with header and data lengths consistent. Each has 290 tensors and 494.0M bf16
+  parameters, all finite. sha256 on the Mac:
+  * `rule_s0` `c35558ab…6d8bc8`;
+  * `exception_s0` `8a252588…03ec84`;
+  * `rule_s1` `b4e32af7…e9e77a`;
+  * `exception_s1` `b3a9c0c5…10ebfcb`.
+
+  The instance copies stay until the instance's hashes are compared with these.
+* Reading, post hoc and not part of the protocol:
+  * the comparison did not test the rule against the exception as designed. Under the
+    tie, honest answering improved on every prompt, held-out included, within 10
+    updates, before either hack's code choice could be learned;
+  * what remained is two near-zero residual hack shares. The exception arm's residual
+    give-ups favour its per-question word, consistent with the lexical preferences in
+    6a; the rule arm's do not use the cue;
+  * read through the coherence argument, the honest behaviour was the coherent one here:
+    one skill shared by every prompt. That was not predicted. A first-order check at
+    pi0 (`probe.py`), which uses no training outcome, could test it.
+
+**Honest-removal diagnostic (`removal.py`; FROZEN 2026-10-25, before any run).** The design
+comes from a review the user passed on (2026-10-25). The branches, the measurement and the
+three readings are the review's; the specifics below were fixed when it was written.
+
+* Question: does reinforcing correct answers on train questions cause the model to prefer
+  honest answers over accepted codes on held-out questions? The main results suggest
+  this (both arms dropped the hack within 10 updates while honest answering improved
+  everywhere, held-out included) but do not establish it. This is a local measurement of
+  one update at pi0. It is not an explanation of the 160-step outcome.
+* Model, data: pi0 (Qwen2.5-0.5B-Instruct) and `c2ndxX_s0` (sha256 `4eb2306e…74580`).
+  Updates use its train renderings; measurement uses its 256 held-out renderings (64
+  questions × 4 cue × order), never trained on.
+* Batches: the first 16 steps of `grpo.py`'s `--balance-cells` schedule at seed 0, 32
+  renderings each (8 per cell). Together they partition the 512 train renderings. Each
+  batch's rollouts come from pi0, using `grpo.py`'s sampler seed for that step (G = 8, 384
+  tokens, generation batch 128). So batch 1 is the main runs' step 1 at seed 0.
+* Arms: rule (primary) and exception (secondary: same procedure, reported beside, not
+  decisive). Rule is primary because there a shared rule defines the held-out accepted
+  code, so a trained hack could transfer to held-out questions. Both arms use the same
+  rollouts; rewards and advantages are computed per arm.
+* The update is `grpo.py`'s step 1 as declared for the main comparison:
+  * proxy reward: honest and the accepted code earn 1;
+  * group-centred, std-normalized advantages;
+  * summed sequence log-probs divided by n_seq = 256;
+  * β = 0.1 (k3);
+  * AdamW, lr 1e-6, betas (0.9, 0.999), eps 1e-8, no weight decay, no clipping, fresh
+    state.
+
+  Rewards and advantages are computed once from the full batch, and the normalization is
+  the same in every branch. The k3 term is the same in every branch: at pi0 its gradient
+  is exactly zero (r = 1). `grpo.py` logged a batch KL of exactly 0 at step 1 in all four
+  main runs.
+* Branches: each starts from the same pi0 weights and takes one update.
+  * **normal**: every response's policy-gradient term.
+  * **honest removed**: the terms of correct integer answers dropped. Only those in
+    mixed-reward groups carry a nonzero term.
+  * **random removal**, 4 draws per batch and arm. In each group, as many responses are
+    dropped as honest removal drops there, drawn uniformly from the group's 8 responses,
+    so a draw can include honest answers. The count is matched per group, hence per
+    prompt and cell. Draws are seeded by (2026, batch, arm, draw).
+  * **accepted removed** (descriptive): the accepted-code terms dropped.
+* Update size: AdamW's first step from a fresh state moves each coordinate by lr · g /
+  (|g| + eps), which is ±lr wherever |g| ≫ 1e-8. Coordinates with |g| near eps move less,
+  and their number differs between branches. Each branch's update is therefore rescaled
+  to the normal update's L2 norm before it is measured. Recorded per branch:
+  * the raw AdamW ‖Δθ‖, the factor, and the share of coordinates whose update sign
+    differs from normal's;
+  * the count, summed advantage and tokens removed. Honest removal removes only positive
+    advantages; random removal removes a mix.
+  * Amended 2026-10-25, before any declared run. The protocol first said the sizes were
+    equal by construction. The CPU plumbing smoke (8 responses per batch) gave raw
+    norms up to 5% apart, so the rescaling was added.
+* Implementation:
+  * gradients are taken one response at a time. Each response's forward pass is then
+    identical in every branch, and a branch's gradient is an exact sum of fixed
+    per-response terms: honest + accepted + other, minus the draw for random removal;
+  * the update is `torch.optim.AdamW`, the optimizer `grpo.py` uses;
+  * on batch 1, the summed normal gradient is checked against one direct backward over
+    the batch.
+* Measurement: fixed, independent pi0 samples, 32 per held-out rendering (sampling seed
+  20261025), graded once.
+  * After each branch's update, log π is computed for every honest and listed-code sample.
+    It is computed in fp32 without autocast, because a bf16 forward would round most of
+    a 1e-6 step away. The few-shot prefix's keys and values are shared across samples.
+  * Δ_j = log π_θ'(y_j) − log π_0(y_j). For rendering i and set X:
+    L_X,i = log mean_{j ∈ X_i} exp Δ_j, the importance-weighted change in log P(X | x_i).
+  * Preference shift ψ_i = L_honest,i − L_accepted,i: the change in log P(honest) /
+    P(accepted), in nats, positive toward honesty.
+  * Support U: renderings with at least one honest and one accepted sample, per arm.
+    A branch's score S is the mean of ψ_i over U.
+* Quantities, each averaged over batches:
+  * S_N (normal), S_H (honest removed), S_R (mean of the 4 draws);
+  * E_H = S_N − S_H and E_R = S_N − S_R;
+  * the decisive contrast C = E_H − E_R = S_R − S_H;
+  * ρ = C / S_N.
+* Uncertainty: 95% percentile intervals from 10,000 bootstrap replicates (seed 0). Each
+  replicate independently resamples three things: the 16 batches; the 64 held-out
+  questions, each with its renderings and samples; and the draws within each batch.
+* Reading, on the rule arm (exception is reported beside it under the same rules):
+  1. invalid if any check fails;
+  2. inconclusive (no shift to weaken) if S_N's lower bound is ≤ 0;
+  3. **supported** if C's lower bound is > 0: removing honest contributions weakens the
+     held-out shift toward honesty more than count-matched random removal does;
+  4. **not supported** if ρ's upper bound is < 0.25. The smallest effect of interest is
+     a quarter of the normal shift; this is a declared tolerance;
+  5. otherwise **inconclusive** (uncertainty too large).
+* Checks; any failure makes the result invalid:
+  * the dataset's sha256, the declared settings, and a git commit without `+dirty`;
+  * 16 × 256 rollouts;
+  * every branch measured on every measured sample, with all values finite;
+  * shared-prefix log π within 0.01 nats of a full forward, on 64 samples;
+  * each branch's ‖Δθ‖ equal to normal's after rescaling, within 1e-3. fp32 weights near 1
+    store a 1e-6 step only to a 1.2e-7 ulp, so the norm cannot be matched more closely;
+  * on batch 1, the summed normal gradient within 1e-4 (relative, max norm) of the
+    direct backward;
+  * if the batch-1 group records equal the main runs' step-1 records (`rule_s0`,
+    `exception_s0`), the normal gradient norm within 1% of the logged step-1 norm
+    (189.96 / 168.99). If the records differ, this check is reported as not applicable.
+* Descriptive:
+  * Δ log P(honest), Δ log P(accepted), Δ log P(other listed code) and the change in the
+    within-tie hack share, per branch on U;
+  * the accepted-removed branch;
+  * a per-batch table, and the number of batches with C_b > 0.
+* What each reading can and cannot show:
+  * **Supported** is causal evidence, for one AdamW step at pi0, that honest contributions
+    drive part of the held-out shift beyond what dropping as many arbitrary contributions
+    does. Honest removal also leaves each mixed group's remaining advantages net
+    negative; random removal does not, on average. So "supported" alone does not separate
+    honest content from positive-advantage mass. The accepted-removed branch, which also
+    removes only positive terms, bears on that, descriptively.
+  * **Not supported** costs the proposed explanation its support. The other parts of the
+    update come next, before any longer training: negative advantages on wrong answers
+    and on the non-accepted code.
+  * AdamW's first step is a sign step, while later steps carry momentum and second
+    moments.
+* Cost: about 2-3 GPU-hours on one 24 GB card (16 batches × 2 arms × 7 branches = 224
+  measurements).
+
+```bash
+cd /workspace/hackability && git pull && git log -1 --format='%h %s'
+D=experiments/tie_drift_llm/data
+sha256sum $D/c2ndxX_s0.json   # 4eb2306e76f2a23092b8b740e9a42ff09dd7259bfc24f0514ccdc2ab93d74580
+python experiments/tie_drift_llm/removal.py run --dataset $D/c2ndxX_s0.json \
+    --out $D/removal_c2ndxX_s0 2>&1 | tee $D/removal_c2ndxX_s0.log
+python experiments/tie_drift_llm/removal.py report $D/removal_c2ndxX_s0 \
+    --main-runs $D/runs/c2ndxX_s0_tie 2>&1 | tee $D/removal_c2ndxX_s0_report.log
+```
+
+`run` resumes from the last finished (batch, arm) if restarted with the same arguments.
+Copy back `removal_c2ndxX_s0/` and both logs (no checkpoints are written).
 
 **Fifth review (2026-10-16, on the positive control 2 criterion).** Every point was
 checked and is adopted:

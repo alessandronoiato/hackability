@@ -134,15 +134,16 @@ def _batch(prompt_ids: list[list[int]], comp_ids: list[list[int]], pad: int, dev
 
 
 def token_logprobs(model, prompt_ids: list[list[int]], comp_ids: list[list[int]],
-                   pad_id: int) -> tuple[torch.Tensor, torch.Tensor]:
+                   pad_id: int, fp32: bool = False) -> tuple[torch.Tensor, torch.Tensor]:
     """Per-token log pi(y_t | x, y_<t) for one micro-batch.
 
     Returns (logp [B, L], mask [B, L]); gradients flow iff grad is enabled.
     Only the completion positions go through the LM head (logits_to_keep).
+    fp32 turns off the CUDA bf16 autocast.
     """
     device = next(model.parameters()).device
     ids, att, pos, cmask, L = _batch(prompt_ids, comp_ids, pad_id, device)
-    with autocast(device):
+    with torch.autocast(device.type, enabled=False) if fp32 else autocast(device):
         logits = model(input_ids=ids, attention_mask=att, position_ids=pos,
                        logits_to_keep=L + 1, use_cache=False).logits[:, :-1]
     logits = logits.float()
@@ -152,12 +153,13 @@ def token_logprobs(model, prompt_ids: list[list[int]], comp_ids: list[list[int]]
 
 
 @torch.no_grad()
-def sequence_logprobs(model, prompt_ids, comp_ids, pad_id, micro_batch: int = 16) -> torch.Tensor:
+def sequence_logprobs(model, prompt_ids, comp_ids, pad_id, micro_batch: int = 16,
+                      fp32: bool = False) -> torch.Tensor:
     """log pi(y | x) for each (prompt, completion) pair, on CPU."""
     out = []
     for b0 in range(0, len(comp_ids), micro_batch):
         lp, _ = token_logprobs(model, prompt_ids[b0:b0 + micro_batch],
-                               comp_ids[b0:b0 + micro_batch], pad_id)
+                               comp_ids[b0:b0 + micro_batch], pad_id, fp32)
         out.append(lp.sum(-1).cpu())
     return torch.cat(out) if out else torch.zeros(0)
 
