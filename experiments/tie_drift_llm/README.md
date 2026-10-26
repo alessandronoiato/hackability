@@ -3344,6 +3344,144 @@ python experiments/tie_drift_llm/removal.py report $D/removal_c2ndxX_s0 \
 `run` resumes from the last finished (batch, arm) if restarted with the same arguments.
 Copy back `removal_c2ndxX_s0/` and both logs (no checkpoints are written).
 
+**Honest-removal diagnostic: results (2026-10-25; run at 21cef09, 3.2 GPU-hours). Status
+INVALID, as declared.** One check fails, so no reading is made and the numbers below are
+reported, not read.
+
+* The failed check: on batch 1 (rule), the summed normal gradient differs from the direct
+  backward by 6.27e-3 relative (max |diff| 0.073 against max |g| 11.70). The declared
+  tolerance is 1e-4.
+* Every other check passes:
+  * dataset sha256, the declared settings, and commit 21cef09 without `+dirty`;
+  * 16 × 256 rollouts;
+  * every branch measured on all 1,959 measured samples, all finite;
+  * shared prefix within 1.21e-4 nats of a full forward, on 64 samples;
+  * update sizes equal after rescaling to within 3.19e-4 (raw AdamW ratios 0.9487 to
+    1.0043);
+  * the batch-1 group records equal the main runs' step 1, and normal |g| is 189.15 vs
+    189.96 logged (−0.43%) and 168.91 vs 168.99 (−0.05%).
+
+  The log has one recovered caching-allocator OOM warning, as in earlier runs, and no
+  error.
+* Cause, established by a follow-up test on the instance (2026-10-25; scratch
+  `noise_test.py`, not in the repo; writes nothing into the run directory): flash
+  attention's backward pass is not bitwise reproducible under bf16. Batch 1, rule, at
+  pi0, repeating the run's own per-response gradient pass on identical terms:
+
+  | setting | max \|diff\| / max \|g\| | L2 rel | sign differs | bitwise equal |
+  |---|---|---|---|---|
+  | bf16, default kernels, repeat vs repeat | 1.26e-2 | 7.13e-3 | 1.45e-3 | no |
+  | fp32, no autocast, repeat vs repeat | 1.89e-5 | 8.58e-6 | 1.29e-6 | no |
+  | bf16, math SDPA backend, repeat vs repeat | 0 | 0 | 0 | yes |
+  | bf16, `use_deterministic_algorithms(True, warn_only=True)` | 4.43e-3 | 6.97e-3 | 1.43e-3 | no |
+
+  * Two identical bf16 passes differ by more than the check's 6.27e-3, so the failed
+    check is run-to-run noise, not an error in the decomposition.
+  * Deterministic mode does not help: torch warns that flash attention has no
+    deterministic algorithm. The math backend makes repeated passes bitwise equal.
+  * The 1e-4 tolerance was set from the CPU smoke, which does not exercise bf16. That
+    was an error in the check.
+* Effect on S: S_normal for batch 1 from four realizations of the gradient is +2.9275
+  (saved run), +2.9265, +2.9274 and +2.9258, a spread of 0.0017 nats. For comparison, C
+  is +2.33 and the four random draws of batch 1 span 2.24-2.40.
+  * The noise does not enter normal, honest removed or accepted removed relative to each
+    other, since all three are built from the same three per-category buffers.
+  * It enters the random branches, which recompute the removed responses' terms, and so
+    it enters C. There it covers fewer responses than a full repeat does.
+  * Descriptive, not a check: the bf16 gradient differs from the fp32 gradient by 8.6%
+    in L2 (sign differs on 2.2% of coordinates). The declared update is `grpo.py`'s
+    bf16 step, so this is part of what is measured, not an error.
+
+Numbers, with 95% intervals (batches × questions × draws), reported, not read:
+
+| | rule (primary) | exception (secondary) |
+|---|---|---|
+| support U | 221 of 256 renderings, 64 questions | 231 of 256, 64 questions |
+| S_N | +1.357 [+0.768, +1.948] | +1.482 [+0.990, +1.960] |
+| S_H | −1.782 [−2.066, −1.490] | −1.708 [−1.955, −1.438] |
+| S_R (4 draws) | +0.550 [+0.020, +1.109] | +0.593 [+0.110, +1.088] |
+| S_A (descriptive) | +3.489 [+3.193, +3.776] | +3.567 [+3.315, +3.805] |
+| C = S_R − S_H | +2.332 [+1.987, +2.692] | +2.301 [+1.923, +2.700] |
+| ρ = C / S_N | +1.72 [+1.32, +2.74] | +1.55 [+1.25, +2.11] |
+| batches with C_b > 0 | 16 of 16 | 16 of 16 |
+
+* Had every check passed, both arms would read **supported**: S_N's lower bound > 0 and
+  C's lower bound > 0.
+* Descriptive, on U, rule arm, branches in the order normal / honest removed / random /
+  accepted removed. Exception agrees with rule to within 0.1 nats.
+  * Δ log P(honest): +0.57 / −1.11 / +0.29 / +0.91.
+  * Δ log P(accepted): −0.78 / +0.67 / −0.26 / −2.58.
+  * Change in the within-tie hack share: −0.19 / +0.31 / −0.07 / −0.38.
+* So one normal step lowers the held-out within-tie hack share by about 0.19 (0.21 under
+  exception).
+* Without the honest terms, the step moves held-out answers toward the accepted code.
+* Removing the accepted terms, which also removes only positive advantages, moves them
+  further toward honesty (S_A > S_N). So the honest-removed drop is not only a loss of
+  positive-advantage mass. This comparison is descriptive: accepted removal drops fewer
+  responses (42 vs 69 in batch 1) and is not count-matched.
+* The one-step shift is the same in both arms.
+* Verified locally with independent code:
+  * every rollout (4,096) and held-out sample (8,192) regraded from raw text: 0
+    mismatches;
+  * the batch prompt ids equal the main runs' steps 1-16 in both arms; the batches
+    partition the 512 train renderings with 8 per cell; the batch-1 group records are
+    equal;
+  * the advantages, the honest and accepted removal sets, and all 128 random draws
+    reproduce from the declared seeds, with counts matched per group; the removed
+    advantage and token sums also match;
+  * the measured-sample assignment is correct (1,959 distinct (rendering, completion)
+    pairs);
+  * ψ, S, C and ρ recomputed from the saved Δ are identical to the report;
+  * a crossed bootstrap of my own, with a different RNG, gives:
+    * C [+1.99, +2.68] / [+1.93, +2.70];
+    * S_N [+0.76, +1.95] / [+0.98, +1.96];
+    * ρ [+1.32, +2.73] / [+1.25, +2.10].
+
+**Amendment and rerun (declared 2026-10-25, after the first run was INVALID and before the
+rerun; agreed with the user).**
+
+* Change: every gradient pass runs under the math SDPA backend, still with bf16 autocast as
+  in `grpo.py`. This covers the per-category buffers, the random-removal recomputations
+  and the batch-1 direct backward.
+  * Under this backend, repeated passes were bitwise equal in the noise test above. So a
+    response's term is the same in every branch, as the implementation section assumes.
+* Nothing else changes: batches, branches, draws, rescaling, measurement, quantities,
+  bootstrap and reading are as frozen. So is every check with its threshold, including
+  the 1e-4 decomposition tolerance.
+  * The 1% gradient-norm check against the main runs' step 1 also stays. The main runs
+    used flash attention, so this check also bounds the arithmetic difference the
+    backend makes.
+* Samples: the rerun reuses the first run's rollouts and held-out samples.
+  * They are copied into the new directory. They were drawn with the declared seeds.
+  * Their sha256 is recorded in `config.json` and printed by `report`.
+  * The updates, the measurements, `base_logprobs` and the prefix check are recomputed.
+* Status:
+  * The first run stays reported as INVALID.
+  * The rerun's status and reading follow the unchanged rules.
+  * If the rerun fails a check, it is invalid too, and there is no further rerun without
+    a new decision.
+* What the rerun can show: it was decided after seeing the first run's numbers. It changes
+  only arithmetic, though: four gradient realizations moved batch-1 S_normal by at most
+  0.0017 nats. So its numbers are expected to be close to the first run's. It is not fresh
+  evidence; it gives the declared computation valid checks.
+* Code: `removal.py` records `grad_attention: math` and the reused samples' sha256 in
+  `config.json`, and `report` prints both. The first run's report prints the backend as
+  default.
+* Cost: about 3.1 GPU-hours. A math-backend batch-1 pass took 52 s against flash's 30 s,
+  and there is no sampling.
+
+```bash
+cd /workspace/hackability && git pull && git log -1 --format='%h %s'
+source /venv/main/bin/activate
+D=experiments/tie_drift_llm/data
+mkdir $D/removal_c2ndxX_s0_math
+cp $D/removal_c2ndxX_s0/rollouts.jsonl.gz $D/removal_c2ndxX_s0/heldout.jsonl.gz $D/removal_c2ndxX_s0_math/
+python experiments/tie_drift_llm/removal.py run --dataset $D/c2ndxX_s0.json \
+    --out $D/removal_c2ndxX_s0_math 2>&1 | tee $D/removal_c2ndxX_s0_math.log
+python experiments/tie_drift_llm/removal.py report $D/removal_c2ndxX_s0_math \
+    --main-runs $D/runs/c2ndxX_s0_tie 2>&1 | tee $D/removal_c2ndxX_s0_math_report.log
+```
+
 **Fifth review (2026-10-16, on the positive control 2 criterion).** Every point was
 checked and is adopted:
 

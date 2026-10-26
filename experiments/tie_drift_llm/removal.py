@@ -19,7 +19,9 @@ lr * g / (|g| + eps), which is about lr wherever |g| >> eps. Coordinates with |g
 move less, and their number differs between branches, so each branch's update is rescaled
 to the normal update's L2 norm (raw norm and factor recorded). Gradients are taken one
 response at a time: each response's term is then the same in every branch, and a branch's
-gradient is an exact sum of them.
+gradient is an exact sum of them. They use the math SDPA backend (still bf16 autocast):
+flash attention's bf16 backward is not bitwise reproducible on CUDA, so a recomputed term
+would differ between branches (README, amendment of 2026-10-25).
 
 Each update is measured on fixed pi0 samples of the held-out renderings (32 per rendering,
 own seed) in fp32 without autocast (a bf16 forward would round most of a 1e-6 step away):
@@ -158,6 +160,7 @@ def rendering_scores(delta: np.ndarray, hs: dict) -> dict:
 # ------------------------------------------------------------------ run
 def run(a) -> None:
     import torch
+    from torch.nn.attention import SDPBackend, sdpa_kernel
 
     import grpo
     import llm
@@ -167,7 +170,7 @@ def run(a) -> None:
     ds = task.load_dataset(a.dataset)
     args = {k: v for k, v in vars(a).items() if k not in ("cmd", "out", "device")}
     meta = dict(args=args, dataset_sha256=grpo.sha256_file(a.dataset), git_commit=grpo.git_commit(),
-                conds=list(CONDS), branches=list(BRANCHES))
+                conds=list(CONDS), branches=list(BRANCHES), grad_attention="math")
     cfg_path = out / "config.json"
     if cfg_path.exists():
         old = json.load(open(cfg_path))
@@ -177,6 +180,12 @@ def run(a) -> None:
         meta = old
         print(f"resuming {out}")
     else:
+        # samples copied in from an earlier run are kept; record which
+        reused = {f: grpo.sha256_file(out / f) for f in ("rollouts.jsonl.gz", "heldout.jsonl.gz") if (out / f).exists()}
+        if reused:
+            meta["samples_at_start"] = reused
+            print("samples already in --out, not regenerated: " +
+                  ", ".join(f"{f} sha256 {h[:12]}" for f, h in reused.items()), flush=True)
         json.dump(meta, open(cfg_path, "w"), indent=1)
     checks_path = out / "checks.json"
     checks = json.load(open(checks_path)) if checks_path.exists() else {}
@@ -276,15 +285,17 @@ def run(a) -> None:
                  f"> {CACHE_TOL} nats; stopping")
 
     def pg_grad(P, C, A, idx):
-        """p.grad = gradient of grpo.py's policy-gradient loss over responses idx only, one per forward."""
+        """p.grad = gradient of grpo.py's policy-gradient loss over responses idx only, one per forward,
+        under the math SDPA backend (bitwise reproducible)."""
         for p in params:
             p.grad = None
-        for i in idx:
-            lp, mask = llm.token_logprobs(policy, [P[i]], [C[i]], pad)
-            ratio = torch.exp(lp - lp.detach())
-            adv = torch.tensor(A[i], dtype=torch.float32, device=lp.device)
-            loss = (-(ratio * adv) * mask).sum() / n_seq
-            loss.backward()
+        with sdpa_kernel(SDPBackend.MATH):
+            for i in idx:
+                lp, mask = llm.token_logprobs(policy, [P[i]], [C[i]], pad)
+                ratio = torch.exp(lp - lp.detach())
+                adv = torch.tensor(A[i], dtype=torch.float32, device=lp.device)
+                loss = (-(ratio * adv) * mask).sum() / n_seq
+                loss.backward()
         for p in params:
             if p.grad is None:
                 p.grad = torch.zeros_like(p)
@@ -500,6 +511,9 @@ def report(a) -> None:
 
     print(f"removal diagnostic: {out}")
     print("  " + ("declared settings" if not nondecl else "NOT THE DECLARED DIAGNOSTIC (" + ", ".join(nondecl) + ")"))
+    print(f"  gradient attention backend: {cfg.get('grad_attention', 'default (flash on CUDA; before the amendment)')}")
+    for f, h in cfg.get("samples_at_start", {}).items():
+        print(f"  {f} reused from an earlier run, sha256 {h}")
     gc = cfg.get("git_commit") or "none"
     check(gc != "none" and not gc.endswith("+dirty"), f"git commit {gc[:12]}{'+dirty' if gc.endswith('+dirty') else ''}")
     check(len(roll) == nb * n_seq and all(sum(r["batch"] == b for r in roll) == n_seq for b in range(1, nb + 1)),
